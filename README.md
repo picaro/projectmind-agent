@@ -1,4 +1,4 @@
-# ProjectMind desktop agent
+# ProjectMind desktop agent (v0.2.3)
 
 Long-running **macOS / Windows / Ubuntu** CLI that:
 
@@ -16,6 +16,32 @@ Long-running **macOS / Windows / Ubuntu** CLI that:
    - **LLM API** (`llm_api`) — cwd-scoped tool loop
 
 Jobs are created from the web **Agents** page (**Run task**) or from a project’s **Tasks** page (**Execute** when a desktop agent is online). The agent never auto-runs todos.
+
+## Quick Start (npm / npx)
+
+Install globally via npm:
+
+```bash
+npm install -g projectmind-agent
+```
+
+Or run directly without installing using `npx`:
+
+```bash
+npx projectmind-agent
+```
+
+### Running the agent
+
+1. Create a `.env` file in your working directory (or set environment variables):
+   ```ini
+   IMEMORY_API_KEY=your_projectmind_api_key
+   IMEMORY_WORKSPACE_ALLOWLIST=/path/to/your/projects
+   ```
+2. Launch the agent:
+   ```bash
+   projectmind-agent
+   ```
 
 ## Download (commercial / end users)
 
