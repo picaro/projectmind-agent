@@ -23,7 +23,7 @@ Downloads are unsigned, so macOS may show “cannot be opened because it is from
    \`xattr -dr com.apple.quarantine .\`
    Or double-click \`clear-quarantine.command\` in Finder.
 2. If it is still blocked: System Settings → Privacy & Security → Security → Open Anyway, then confirm.
-3. Or in Finder: Control-click \`imemory-agent\` → Open → Open.
+3. Or in Finder: Control-click \`projectmind-agent\` → Open → Open.
 `;
 
 const WINDOWS_SMARTSCREEN_SECTION = `
@@ -32,7 +32,7 @@ const WINDOWS_SMARTSCREEN_SECTION = `
 Unsigned downloads may be blocked by Microsoft Defender SmartScreen.
 
 1. Click **More info**, then **Run anyway** (or Allow on this device).
-2. Or right-click \`imemory-agent.exe\` → Properties → check **Unblock** → Apply → OK, then run again.
+2. Or right-click \`projectmind-agent.exe\` → Properties → check **Unblock** → Apply → OK, then run again.
 `;
 
 /**
@@ -76,7 +76,7 @@ When ProjectMind publishes a newer agent under \`/downloads/agent/\`, this insta
 
 - Prefer this build when you already have Node.js and want \`cursor_sdk\`.
 - Native macOS / Windows / Ubuntu zips do not require Node.js (CLI runners only).
-- Put \`.env\` next to \`imemory-agent.cjs\` or in the current working directory.
+- Put \`.env\` next to \`projectmind-agent.cjs\` or in the current working directory.
 - \`npm install\` may show engine warnings if Node is older than 22.13 — upgrade Node, then reinstall.
 `;
   }
@@ -103,7 +103,7 @@ xattr -dr com.apple.quarantine .
 5. In Terminal, \`cd\` into this folder and run:
 
 \`\`\`
-./imemory-agent
+./projectmind-agent
 \`\`\`
 
 The agent heartbeats to ProjectMind and polls for jobs. Stop with Ctrl+C.
@@ -134,10 +134,10 @@ ${ENV_SETUP_STEPS}
 4. Open **Command Prompt** or **PowerShell**, \`cd\` into this folder, and run:
 
 \`\`\`
-.\\imemory-agent.exe
+.\\projectmind-agent.exe
 \`\`\`
 
-Or double-click \`imemory-agent.exe\` after editing \`.env\` (a console window stays open while the agent runs).
+Or double-click \`projectmind-agent.exe\` after editing \`.env\` (a console window stays open while the agent runs).
 
 The agent heartbeats to ProjectMind and polls for jobs. Stop with Ctrl+C.
 ${WINDOWS_SMARTSCREEN_SECTION}
@@ -148,7 +148,7 @@ ${WINDOWS_SMARTSCREEN_SECTION}
 - Auto-updates from ProjectMind \`/downloads/agent/manifest.json\` when a newer version is published (preserves \`.env\`). Disable with \`IMEMORY_AGENT_AUTO_UPDATE=0\`.
 - \`cursor_sdk\` runner needs Node + \`@cursor/sdk\` — use the **Node.js** download zip, or a source checkout.
 - Packaged native builds use CLI/API runners (\`cursor_cli\`, \`codex_cli\`, \`antigravity_cli\`, \`claude_cli\`, \`copilot_cli\`, \`openrouter\`, \`tokenrouter\`, \`llm_api\`).
-- Put \`.env\` next to \`imemory-agent.exe\` or in the current working directory.
+- Put \`.env\` next to \`projectmind-agent.exe\` or in the current working directory.
 `;
   }
 
@@ -164,22 +164,22 @@ Native Linux (glibc) binary — **no Node.js required**. Works on Ubuntu and mos
 1. Unzip this archive:
 
 \`\`\`
-unzip imemory-agent-ubuntu-x64.zip -d imemory-agent
-cd imemory-agent
+unzip projectmind-agent-ubuntu-x64.zip -d projectmind-agent
+cd projectmind-agent
 \`\`\`
 
 ${ENV_SETUP_STEPS}
 3. Ensure the binary is executable (zip usually preserves this):
 
 \`\`\`
-chmod +x ./imemory-agent
+chmod +x ./projectmind-agent
 \`\`\`
 
 4. Install a runner CLI on PATH when needed (Cursor Agent \`agent\`, Codex \`codex\`, or Antigravity \`agy\`).
 5. Run:
 
 \`\`\`
-./imemory-agent
+./projectmind-agent
 \`\`\`
 
 The agent heartbeats to ProjectMind and polls for jobs. Stop with Ctrl+C.
@@ -217,14 +217,14 @@ export async function writePackagedReadme(dir, target, version, opts = {}) {
 /** Default macOS quarantine helper used by the release build. */
 export async function writeClearQuarantineHelper(dir) {
   const body = `#!/bin/bash
-# Clears macOS download quarantine so ./imemory-agent can run (unsigned build).
+# Clears macOS download quarantine so ./projectmind-agent can run (unsigned build).
 cd "$(dirname "$0")" || exit 1
 if ! command -v xattr >/dev/null 2>&1; then
   echo "xattr not found; use System Settings → Privacy & Security → Open Anyway instead."
   exit 1
 fi
 xattr -dr com.apple.quarantine .
-echo "Quarantine cleared. You can run: ./imemory-agent"
+echo "Quarantine cleared. You can run: ./projectmind-agent"
 `;
   const path = join(dir, "clear-quarantine.command");
   await writeFile(path, body, "utf8");

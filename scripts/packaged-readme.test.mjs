@@ -47,7 +47,7 @@ describe("packaged-readme", () => {
     const bodies = Object.fromEntries(TARGETS.map((t) => [t.id, buildPackagedReadme(t, "0.2.0")]));
 
     expect(bodies["macos-arm64"]).toContain("How to run (macOS)");
-    expect(bodies["macos-arm64"]).toContain("./imemory-agent");
+    expect(bodies["macos-arm64"]).toContain("./projectmind-agent");
     expect(bodies["macos-arm64"]).toContain("xattr -dr com.apple.quarantine");
     expect(bodies["macos-arm64"]).toContain("Apple Silicon");
     expect(bodies["macos-arm64"]).toContain(PRODUCTION_MCP_URL);
@@ -57,12 +57,12 @@ describe("packaged-readme", () => {
     expect(bodies["macos-x64"]).not.toContain("Apple Silicon");
 
     expect(bodies["windows-x64"]).toContain("How to run (Windows)");
-    expect(bodies["windows-x64"]).toContain(".\\imemory-agent.exe");
+    expect(bodies["windows-x64"]).toContain(".\\projectmind-agent.exe");
     expect(bodies["windows-x64"]).toContain("SmartScreen");
-    expect(bodies["windows-x64"]).not.toContain("./imemory-agent");
+    expect(bodies["windows-x64"]).not.toContain("./projectmind-agent");
 
     expect(bodies["ubuntu-x64"]).toContain("How to run (Ubuntu / Linux)");
-    expect(bodies["ubuntu-x64"]).toContain("chmod +x ./imemory-agent");
+    expect(bodies["ubuntu-x64"]).toContain("chmod +x ./projectmind-agent");
     expect(bodies["ubuntu-x64"]).toContain("glibc");
     expect(bodies["ubuntu-x64"]).not.toContain("SmartScreen");
     expect(bodies["ubuntu-x64"]).not.toContain("Gatekeeper");
@@ -74,7 +74,7 @@ describe("packaged-readme", () => {
     expect(bodies.nodejs).toContain("start.command");
     expect(bodies.nodejs).toContain("Node.js 22.13+");
     expect(bodies.nodejs).toContain("auto-updates");
-    expect(bodies.nodejs).not.toContain("./imemory-agent");
+    expect(bodies.nodejs).not.toContain("./projectmind-agent");
     expect(bodies.nodejs).not.toContain("Node.js 18+");
 
     expect(bodies["macos-arm64"]).toContain("Auto-updates from ProjectMind");

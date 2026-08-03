@@ -15,7 +15,7 @@ import {
 describe("packaged-nodejs", () => {
   it("builds package.json with start, postinstall, engines, and undici override", () => {
     const pkg = buildNodejsPackageJson("0.2.0", "^1.0.24");
-    expect(pkg.scripts.start).toBe("node ./imemory-agent.cjs");
+    expect(pkg.scripts.start).toBe("node ./projectmind-agent.cjs");
     expect(pkg.scripts.postinstall).toBe(`node ./${POSTINSTALL_HINT_FILENAME}`);
     expect(pkg.engines).toEqual(NODEJS_AGENT_ENGINES);
     expect(pkg.engines.node).toBe(">=22.13");

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractMacAgentJobContractFromPrompt,
   parseMacAgentJobContract,
-} from "@imemory/improvement-contracts";
+} from "./improvement-contracts/index.js";
 import { enforceContractSafety } from "./improvement-job.js";
 
 describe("improvement job contract (mac-agent)", () => {

@@ -36,15 +36,18 @@ export const POSTINSTALL_HINT_FILENAME = "postinstall-hint.cjs";
  */
 export function buildNodejsPackageJson(version, cursorSdkRange) {
   return {
-    name: "imemory-agent",
+    name: "projectmind-agent",
     version: String(version || "0.0.0"),
     private: true,
     description: "ProjectMind desktop agent (Node.js) — heartbeat + claim/run task jobs",
     type: "commonjs",
-    main: "./imemory-agent.cjs",
-    bin: { "imemory-agent": "./imemory-agent.cjs" },
+    main: "./projectmind-agent.cjs",
+    bin: {
+      "projectmind-agent": "./projectmind-agent.cjs",
+      "imemory-agent": "./projectmind-agent.cjs"
+    },
     scripts: {
-      start: "node ./imemory-agent.cjs",
+      start: "node ./projectmind-agent.cjs",
       postinstall: `node ./${POSTINSTALL_HINT_FILENAME}`,
     },
     dependencies: {

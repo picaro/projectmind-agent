@@ -154,12 +154,14 @@ export function detectInstall(options: SelfUpdateDeps = {}): DetectedInstall {
   const scriptArg = argv[1] ? resolve(argv[1]) : "";
   const candidates = [
     scriptArg,
+    join(cwd, "projectmind-agent.cjs"),
+    join(dirname(scriptArg || cwd), "projectmind-agent.cjs"),
     join(cwd, "imemory-agent.cjs"),
     join(dirname(scriptArg || cwd), "imemory-agent.cjs"),
   ].filter(Boolean);
 
   for (const candidate of candidates) {
-    if (candidate.endsWith("imemory-agent.cjs") && existsSync(candidate)) {
+    if ((candidate.endsWith("projectmind-agent.cjs") || candidate.endsWith("imemory-agent.cjs")) && existsSync(candidate)) {
       return {
         kind: "nodejs",
         installDir: dirname(candidate),

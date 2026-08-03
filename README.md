@@ -24,22 +24,22 @@ Unsigned zip executables (no Node.js required) plus a **Node.js** cross-platform
 Build them locally:
 
 ```bash
-npm run agent:build-release
-# → public/downloads/agent/imemory-agent-macos-arm64.zip
-# → public/downloads/agent/imemory-agent-macos-x64.zip
-# → public/downloads/agent/imemory-agent-windows-x64.zip
-# → public/downloads/agent/imemory-agent-ubuntu-x64.zip
-# → public/downloads/agent/imemory-agent-nodejs.zip
+npm run build:release
+# → public/downloads/agent/projectmind-agent-macos-arm64.zip
+# → public/downloads/agent/projectmind-agent-macos-x64.zip
+# → public/downloads/agent/projectmind-agent-windows-x64.zip
+# → public/downloads/agent/projectmind-agent-ubuntu-x64.zip
+# → public/downloads/agent/projectmind-agent-nodejs.zip
 # → public/downloads/agent/manifest.json
 ```
 
-Native zips contain `imemory-agent` (or `.exe`), a sample `.env` (production app URL + placeholders), `.env.example`, and a **platform-specific `README.txt`** (how to run on that OS). macOS zips also include `clear-quarantine.command`. The Ubuntu zip is a glibc Linux x64 binary (works on Ubuntu and most desktop Linux distros). The Node.js zip contains a bundled `imemory-agent.cjs`, `package.json` (installs `@cursor/sdk`), sample `.env` / `.env.example`, `postinstall` hint, `start.command`, and its own `README.txt` — run `npm install && npm start` (Node.js **22.13+**; bare `npm run` only lists scripts).
+Native zips contain `projectmind-agent` (or `.exe`), a sample `.env` (production app URL + placeholders), `.env.example`, and a **platform-specific `README.txt`** (how to run on that OS). macOS zips also include `clear-quarantine.command`. The Ubuntu zip is a glibc Linux x64 binary (works on Ubuntu and most desktop Linux distros). The Node.js zip contains a bundled `projectmind-agent.cjs`, `package.json` (installs `@cursor/sdk`), sample `.env` / `.env.example`, `postinstall` hint, `start.command`, and its own `README.txt` — run `npm install && npm start` (Node.js **22.13+**; bare `npm run` only lists scripts).
 
 | Package | How to run (see README.txt in the zip)                       |
 | ------- | ------------------------------------------------------------ |
-| macOS   | `./imemory-agent` (clear quarantine first)                   |
-| Windows | `.\\imemory-agent.exe`                                       |
-| Ubuntu  | `chmod +x ./imemory-agent && ./imemory-agent`                |
+| macOS   | `./projectmind-agent` (clear quarantine first)               |
+| Windows | `.\\projectmind-agent.exe`                                   |
+| Ubuntu  | `chmod +x ./projectmind-agent && ./projectmind-agent`        |
 | Node.js | `npm install && npm start` (Node 22.13+; not bare `npm run`) |
 
 ### macOS: “not allowed” / unidentified developer
@@ -48,7 +48,7 @@ Builds are **unsigned**, so Gatekeeper often blocks the binary after download (c
 
 1. From the unzipped folder: `xattr -dr com.apple.quarantine .` — or double-click `clear-quarantine.command`.
 2. If still blocked: **System Settings → Privacy & Security → Security → Open Anyway**, then confirm.
-3. Or in Finder: Control-click `imemory-agent` → **Open** → **Open**.
+3. Or in Finder: Control-click `projectmind-agent` → **Open** → **Open**.
 
 Long-term fix is Apple Developer ID signing + notarization (not in this release yet).
 

@@ -12,7 +12,7 @@ export async function connectMcpClient(mcpUrl: URL, apiKey: string): Promise<Cli
   });
 
   const client = new Client({
-    name: "imemory-mac-agent",
+    name: "projectmind-agent",
     version: getAgentVersion(),
   });
 

@@ -42,8 +42,8 @@ const TARGETS = [
     os: "macos",
     arch: "arm64",
     pkgTarget: "node22-macos-arm64",
-    binaryName: "imemory-agent",
-    zipName: "imemory-agent-macos-arm64.zip",
+    binaryName: "projectmind-agent",
+    zipName: "projectmind-agent-macos-arm64.zip",
     bytes: 0,
   },
   {
@@ -52,8 +52,8 @@ const TARGETS = [
     os: "macos",
     arch: "x64",
     pkgTarget: "node22-macos-x64",
-    binaryName: "imemory-agent",
-    zipName: "imemory-agent-macos-x64.zip",
+    binaryName: "projectmind-agent",
+    zipName: "projectmind-agent-macos-x64.zip",
     bytes: 0,
   },
   {
@@ -62,8 +62,8 @@ const TARGETS = [
     os: "windows",
     arch: "x64",
     pkgTarget: "node22-win-x64",
-    binaryName: "imemory-agent.exe",
-    zipName: "imemory-agent-windows-x64.zip",
+    binaryName: "projectmind-agent.exe",
+    zipName: "projectmind-agent-windows-x64.zip",
     bytes: 0,
   },
   {
@@ -72,8 +72,8 @@ const TARGETS = [
     os: "ubuntu",
     arch: "x64",
     pkgTarget: "node22-linux-x64",
-    binaryName: "imemory-agent",
-    zipName: "imemory-agent-ubuntu-x64.zip",
+    binaryName: "projectmind-agent",
+    zipName: "projectmind-agent-ubuntu-x64.zip",
     bytes: 0,
   },
 ];
@@ -128,7 +128,7 @@ const NODEJS_TARGET = {
   label: "Node.js (cross-platform)",
   os: "nodejs",
   arch: "any",
-  zipName: "imemory-agent-nodejs.zip",
+  zipName: "projectmind-agent-nodejs.zip",
   bytes: 0,
 };
 
@@ -159,7 +159,7 @@ async function packageNodejsZip(bundlePath) {
   await rm(stage, { recursive: true, force: true });
   await mkdir(stage, { recursive: true });
 
-  await copyFile(bundlePath, join(stage, "imemory-agent.cjs"));
+  await copyFile(bundlePath, join(stage, "projectmind-agent.cjs"));
   await writePackagedEnvFiles(stage, agentRoot);
   await writeSetupReadme(stage, NODEJS_TARGET);
 

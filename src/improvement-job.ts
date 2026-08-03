@@ -5,10 +5,10 @@ import {
   assertChangeAllowed,
   extractMacAgentJobContractFromPrompt,
   parseMacAgentJobContract,
+  loadImemoryProjectManifest,
   type MacAgentCallbackBody,
   type MacAgentJobContractV1,
-} from "@imemory/improvement-contracts";
-import { loadImemoryProjectManifest } from "@imemory/improvement-contracts/node";
+} from "./improvement-contracts/index.js";
 
 export {
   extractMacAgentJobContractFromPrompt,
