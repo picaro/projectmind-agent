@@ -1,0 +1,41 @@
+{
+  "name": "imemory-mac-agent",
+  "private": true,
+  "version": "0.2.1",
+  "type": "module",
+  "description": "Desktop agent (macOS/Windows/Ubuntu) that heartbeats to ProjectMind and runs claimed task jobs via Cursor SDK, Cursor CLI, Codex CLI, Antigravity CLI, or LLM API",
+  "bin": {
+    "imemory-agent": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "build:release": "node scripts/build-release.mjs"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.24",
+    "@imemory/improvement-contracts": "file:../packages/improvement-contracts",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "dotenv": "^16.6.1",
+    "fflate": "^0.8.3",
+    "zod": "^4.4.3"
+  },
+  "overrides": {
+    "undici": "6.27.0"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@yao-pkg/pkg": "^6.14.1",
+    "esbuild": "^0.25.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "pkg": {
+    "assets": [],
+    "outputPath": "dist-release/bin"
+  }
+}
