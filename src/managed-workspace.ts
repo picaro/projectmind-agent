@@ -599,6 +599,7 @@ export async function ensureManagedClone(
     ["rev-parse", "--verify", `origin/${branch}`],
     input.credentials,
   );
+  let targetSha: string | null = remoteRef.code === 0 ? remoteRef.stdout.trim() : null;
   if (remoteRef.code !== 0) {
     const symbolic = await runGit(
       localPath,
@@ -614,6 +615,34 @@ export async function ensureManagedClone(
     }
     targetBranch = detected;
     log(`origin/${branch} not found; using origin/${targetBranch}`);
+
+    const targetRef = await runGit(
+      localPath,
+      ["rev-parse", "--verify", `origin/${targetBranch}`],
+      input.credentials,
+    );
+    targetSha = targetRef.code === 0 ? targetRef.stdout.trim() : null;
+  }
+
+  // Idempotent no-op: if this checkout is already on the target branch at the
+  // target commit, skip checkout + reset entirely rather than re-running them
+  // for no effect on every call.
+  if (targetSha) {
+    const currentBranch = await runGit(
+      localPath,
+      ["symbolic-ref", "--short", "-q", "HEAD"],
+      input.credentials,
+    );
+    const currentSha = await runGit(localPath, ["rev-parse", "HEAD"], input.credentials);
+    if (
+      currentBranch.code === 0 &&
+      currentBranch.stdout.trim() === targetBranch &&
+      currentSha.code === 0 &&
+      currentSha.stdout.trim() === targetSha
+    ) {
+      log(`Already up to date at ${targetSha} (${targetBranch})`);
+      return { ok: true, created: false, headSha: targetSha };
+    }
   }
 
   const checkout = await runGit(localPath, ["checkout", targetBranch], input.credentials);

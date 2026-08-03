@@ -272,6 +272,32 @@ describe("ensureManagedClone", () => {
     expect(verbs).not.toContain("clean");
   });
 
+  it("skips checkout and reset when already at the target commit on the target branch", async () => {
+    const target = path.join(tmpRoot, "already-current");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: "cafe123\n" };
+      if (args[0] === "symbolic-ref") return { code: 0, stdout: "main\n" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: "cafe123\n" };
+      return { code: 0 };
+    });
+
+    const result = await ensureManagedClone({
+      localPath: target,
+      cloneUrl: "https://github.com/org/app.git",
+      defaultBranch: "main",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({ ok: true, created: false, headSha: "cafe123" });
+    const verbs = calls.map((c) => c[0]);
+    expect(verbs).toContain("fetch");
+    expect(verbs).not.toContain("checkout");
+    expect(verbs).not.toContain("reset");
+  });
+
   it("falls back to origin/HEAD when the named branch is missing", async () => {
     const target = path.join(tmpRoot, "odd-branch");
     fs.mkdirSync(path.join(target, ".git"), { recursive: true });
