@@ -1,6 +1,6 @@
 {
   "name": "projectmind-agent",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "type": "module",
   "description": "Desktop agent (macOS/Windows/Ubuntu) that heartbeats to ProjectMind and runs claimed task jobs via Cursor SDK, Cursor CLI, Codex CLI, Antigravity CLI, or LLM API",
   "main": "./dist/cli.js",
