@@ -228,6 +228,24 @@ describe("awaitBeforeInvoke", () => {
     expect(formatPacingLog(wait)).toContain("reason=min_gap");
   });
 
+  it("clears a sticky local cooldown when the server sends null", () => {
+    recordRateLimit("cursor_cli", {
+      nowMs: 1_000,
+      retryAfterMs: 60 * 60 * 1000,
+      config: baseConfig(),
+    });
+    expect(isInCooldown("cursor_cli", 5_000)).toBe(true);
+    expect(isInCooldown("cursor_sdk", 5_000)).toBe(true);
+
+    syncGlobalCooldowns([
+      { runner: "cursor_cli", cooldown_until: null },
+      { runner: "cursor_sdk", cooldown_until: null },
+    ]);
+
+    expect(isInCooldown("cursor_cli", 5_000)).toBe(false);
+    expect(isInCooldown("cursor_sdk", 5_000)).toBe(false);
+  });
+
   it("waits for soft RPM cap", async () => {
     const sleeps: number[] = [];
     const cfg = baseConfig();

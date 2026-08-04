@@ -585,12 +585,12 @@ export function syncGlobalCooldowns(
     }
     if (t > now) {
       cooldownUntilByProvider.set(runner, t);
-    } else if (cooldownUntilByProvider.has(runner)) {
-      // only clear if it was previously set globally and is now removed
-      const current = cooldownUntilByProvider.get(runner)!;
-      if (current < now || current === t || current === MODEL_DISABLED_UNTIL_MS) {
-        cooldownUntilByProvider.delete(runner);
-      }
+    } else {
+      // Server says clear/expired. Always drop local state — otherwise a prior
+      // local recordRateLimit (or family share) sticks forever when the control
+      // plane has already cleared the row (null), and the pre-claim gate keeps
+      // skipping work even though Cursor CLI is healthy again.
+      cooldownUntilByProvider.delete(runner);
     }
   }
 }

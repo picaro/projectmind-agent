@@ -353,7 +353,66 @@ export async function executeClaimedJob(
     gitCredentials ? { username: gitCredentials.username, token: gitCredentials.token } : null,
   );
 
+  // Lease keepalive must start before workspace prep: clone/install often exceeds
+  // AGENT_JOB_LEASE_TTL_MS (2 min) and used to expire the claim with zero renewals.
+  const abort = new AbortController();
+  let renewCount = 0;
+  let renewTimer: ReturnType<typeof setInterval> | null = null;
+  let cancelPoll: ReturnType<typeof setInterval> | null = null;
+  const renewLease = async (): Promise<void> => {
+    try {
+      const status = await getJobStatus(client, job.id);
+      if (status === "cancelled" || status === "paused") {
+        logLocal(
+          job.id,
+          `${status === "paused" ? "Pause" : "Cancel"} detected during lease renew — aborting`,
+        );
+        abort.abort();
+        return;
+      }
+      renewCount += 1;
+      await callToolJson(client, "renewAgentJobLease", {
+        jobId: job.id,
+        agentKey,
+      });
+      logLocal(job.id, `Lease renewed (#${renewCount}), status=${status ?? "?"}`);
+    } catch (err) {
+      logLocal(
+        job.id,
+        `Lease renew failed: ${err instanceof Error ? err.message : err}`,
+        "error",
+      );
+    }
+  };
+  const stopLeaseKeepalive = (): void => {
+    if (renewTimer != null) {
+      clearInterval(renewTimer);
+      renewTimer = null;
+    }
+    if (cancelPoll != null) {
+      clearInterval(cancelPoll);
+      cancelPoll = null;
+    }
+  };
+
   try {
+    await renewLease();
+    renewTimer = setInterval(() => {
+      void renewLease();
+    }, LEASE_RENEW_MS);
+    cancelPoll = setInterval(() => {
+      void (async () => {
+        const status = await getJobStatus(client, job.id);
+        if (status === "cancelled" || status === "paused") {
+          logLocal(
+            job.id,
+            `${status === "paused" ? "Pause" : "Cancel"} detected on poll — aborting`,
+          );
+          abort.abort();
+        }
+      })();
+    }, 5_000);
+
     /**
      * Installation tokens live one hour and jobs routinely run longer, with the
      * push and PR happening last — re-mint immediately before publishing rather
@@ -620,55 +679,6 @@ export async function executeClaimedJob(
 
     await gotoPhase("executing");
 
-    const abort = new AbortController();
-    let renewCount = 0;
-    const renewLease = async (): Promise<void> => {
-      try {
-        const status = await getJobStatus(client, job.id);
-        if (status === "cancelled" || status === "paused") {
-          logLocal(
-            job.id,
-            `${status === "paused" ? "Pause" : "Cancel"} detected during lease renew — aborting`,
-          );
-          abort.abort();
-          return;
-        }
-        renewCount += 1;
-        await callToolJson(client, "renewAgentJobLease", {
-          jobId: job.id,
-          agentKey,
-        });
-        logLocal(job.id, `Lease renewed (#${renewCount}), status=${status ?? "?"}`);
-      } catch (err) {
-        logLocal(
-          job.id,
-          `Lease renew failed: ${err instanceof Error ? err.message : err}`,
-          "error",
-        );
-      }
-    };
-    // Renew once immediately: setup work above (worktree, safety/project checks) can already
-    // eat a meaningful chunk of the lease TTL, and setInterval's first tick doesn't fire for
-    // another LEASE_RENEW_MS — without this, a slow setup phase can let the original claim-time
-    // lease expire before any renewal ever lands.
-    await renewLease();
-    const renewTimer = setInterval(() => {
-      void renewLease();
-    }, LEASE_RENEW_MS);
-
-    const cancelPoll = setInterval(() => {
-      void (async () => {
-        const status = await getJobStatus(client, job.id);
-        if (status === "cancelled" || status === "paused") {
-          logLocal(
-            job.id,
-            `${status === "paused" ? "Pause" : "Cancel"} detected on poll — aborting`,
-          );
-          abort.abort();
-        }
-      })();
-    }, 5_000);
-
     let result: RunnerResult;
     let finalRunner: RunnerName | null = null;
     try {
@@ -743,8 +753,6 @@ export async function executeClaimedJob(
           );
         }
 
-        clearInterval(renewTimer);
-        clearInterval(cancelPoll);
         await releaseJobToQueue(client, job.id, agentKey);
         return;
       }
@@ -885,9 +893,6 @@ export async function executeClaimedJob(
         error: err instanceof Error ? err.message : String(err),
       };
       logLocal(job.id, `Runner threw: ${result.error}`, "error");
-    } finally {
-      clearInterval(renewTimer);
-      clearInterval(cancelPoll);
     }
 
     const elapsedMs = Date.now() - startedAt;
@@ -1246,6 +1251,7 @@ export async function executeClaimedJob(
       // best-effort complete
     }
   } finally {
+    stopLeaseKeepalive();
     // Never let one job's credential outlive it into the next.
     setActiveGitCredentials(null);
     logLocal(job.id, `Done (total ${Date.now() - startedAt}ms)`);
