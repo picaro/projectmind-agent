@@ -33,6 +33,8 @@ The ProjectMind Agent runs on your machine and:
 
 All work happens in directories you explicitly allow, with full control over what the agent can access.
 
+> **Note:** This repo is a worker / reference implementation for ProjectMind — it claims and executes jobs but does not own product direction. The canonical product vision, agent/orchestration protocol, and control-plane docs (`docs/product-vision.md`, protocol/MCP docs, etc.) live in the ProjectMind (imemory) control-plane repo; consult those before making architectural changes here.
+
 ## Commands
 
 Once installed, you can use these commands:
@@ -45,6 +47,10 @@ projectmind-agent test     # Test all configured AI assistants
 projectmind-agent runners  # List available AI assistant integrations
 projectmind-agent help     # Show help information
 ```
+
+## Product direction
+
+This agent is a worker in the ProjectMind protocol — it claims and executes jobs but never owns lifecycle state, retries, budgets, or approvals; the ProjectMind orchestrator (`imemory` repo) does. For the control-plane vision and where this agent fits (reference Node.js agent, protocol/SDK direction, profiles), see [`docs/product-vision.md`](https://github.com/picaro/iremenber/blob/main/docs/product-vision.md) and [`docs/product-vision-gap-analysis.md`](https://github.com/picaro/iremenber/blob/main/docs/product-vision-gap-analysis.md) in the main ProjectMind repository.
 
 ## Requirements
 
