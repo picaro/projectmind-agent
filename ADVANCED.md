@@ -100,9 +100,15 @@ creates it under `IMEMORY_MANAGED_WORKSPACE_ROOT`
   machine needs no ssh key and no `gh auth login`. The token is passed through
   the environment only: it never reaches `.git/config`, argv, or the logs.
 - A managed checkout with a remote is agent-owned and is hard-reset before every
-  job. Never point managed mode at a directory holding work you care about; if the
-  path exists but is not a git repository, the agent refuses rather than deleting
+  job (including when already on the default branch SHA but dirty). After each
+  job the agent also restores the base checkout to the default branch. Never
+  point managed mode at a directory holding work you care about; if the path
+  exists but is not a git repository, the agent refuses rather than deleting
   it. A local-only (`git init`) workspace is never reset — it holds the only copy.
+- An allowlisted (user-configured) checkout is never hard-reset. Prepare and
+  post-job cleanup switch it back to the default branch, auto-stashing any
+  leftover dirty work so the next job is not blocked. Recover stashes with
+  `git stash list` / `git stash pop`.
 
 Install CLIs on PATH when using those runners:
 
@@ -178,6 +184,7 @@ After a **successful implement** job, if the workspace is a git repo with uncomm
 1. Stages changes (`git add -A`)
 2. Commits with a short message derived from the runner summary (what was done)
 3. Pushes to the remote (`git push`, or `git push -u origin HEAD` if needed)
+4. Restores the base checkout to the repository default branch (stash + checkout for allowlisted paths; hard-reset for managed)
 
 **Plan phase:** ambiguous/complex tasks may queue with `phase=plan`. The agent proposes a plan or clarifying questions, then sets the job to `awaiting_user` (task stays open). Approve/answer/reject on the web **Agents** page; approve enqueues an implement follow-up job.
 
