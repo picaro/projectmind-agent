@@ -22,6 +22,17 @@ import {
   maybeSelfUpdate,
   parseUpdateCheckIntervalMs,
 } from "./self-update.js";
+import { shouldRunSetupWizard, runSetupWizard } from "./setup-wizard.js";
+import {
+  parseCliCommand,
+  runSetupCommand,
+  runDoctorCommand,
+  runTestCommand,
+  runRunnersCommand,
+  showHelp,
+  showVersion,
+} from "./cli-commands.js";
+import { resolveAutoRunnerChainWithDiagnostics } from "./runners/resolve.js";
 
 const cwd = process.cwd();
 const execDir = dirname(process.execPath);
@@ -150,12 +161,101 @@ async function maybeRunHealthCheck(
   }
 }
 
+function showStartupBanner(
+  agentVersion: string,
+  agentBuildDate: string | null,
+  availableRunners: string[],
+): void {
+  console.log("\n╔═══════════════════════════════════════════════════════════╗");
+  console.log(`║  ProjectMind Agent v${agentVersion.padEnd(37)}║`);
+  if (agentBuildDate) {
+    console.log(`║  Build: ${agentBuildDate.substring(0, 43).padEnd(48)}║`);
+  }
+  console.log("╚═══════════════════════════════════════════════════════════╝\n");
+  
+  if (availableRunners.length > 0) {
+    console.log("Available runners:");
+    availableRunners.forEach(r => console.log(`  ✓ ${r}`));
+  } else {
+    console.log("⚠️  No runners available - run 'projectmind-agent doctor' for help");
+  }
+  console.log();
+}
+
 async function main(): Promise<void> {
+  const agentVersion = getAgentVersion();
+  const agentBuildDate = getAgentBuildDate();
+  
+  // Handle CLI commands
+  const { command, args } = parseCliCommand(process.argv.slice(2));
+  const envPath = resolve(cwd, ".env");
+  
+  if (command === "help") {
+    showHelp(agentVersion);
+    return;
+  }
+  
+  if (command === "version") {
+    showVersion(agentVersion, agentBuildDate);
+    return;
+  }
+  
+  if (command === "setup") {
+    const exitCode = await runSetupCommand(envPath);
+    process.exit(exitCode);
+  }
+  
+  if (command === "doctor") {
+    const exitCode = await runDoctorCommand(envPath);
+    process.exit(exitCode);
+  }
+  
+  if (command === "test") {
+    const exitCode = await runTestCommand();
+    process.exit(exitCode);
+  }
+  
+  if (command === "runners") {
+    const exitCode = await runRunnersCommand();
+    process.exit(exitCode);
+  }
+  
+  // Check if setup wizard should run (only when starting agent normally)
+  if (!command) {
+    const needsSetup = await shouldRunSetupWizard(envPath);
+    if (needsSetup) {
+      console.log("\n⚠️  Configuration missing or incomplete.");
+      console.log("\nRun setup wizard now? [Y/n] ");
+      
+      // Simple prompt for setup
+      const response = await new Promise<string>((resolve) => {
+        process.stdin.once("data", (data) => {
+          resolve(data.toString().trim());
+        });
+      });
+      
+      if (!response || response.toLowerCase() === "y" || response.toLowerCase() === "yes") {
+        const result = await runSetupWizard(envPath);
+        if (!result.success) {
+          console.log("\nSetup incomplete. Exiting.");
+          process.exit(1);
+        }
+        console.log("\nStarting agent...\n");
+        // Reload env after setup
+        loadEnv({ path: envPath });
+      } else {
+        console.log("\nSetup skipped. Note: agent may not work without proper configuration.");
+        console.log("Run 'projectmind-agent setup' when ready.\n");
+      }
+    }
+  }
+  
   const apiKey = process.env.IMEMORY_API_KEY?.trim() || process.env.MCP_API_KEY?.trim();
   if (!apiKey) {
-    throw new Error(
-      "Missing IMEMORY_API_KEY (or MCP_API_KEY). Create a project API key in ProjectMind settings.",
-    );
+    console.error("\n❌ Missing IMEMORY_API_KEY (or MCP_API_KEY).");
+    console.error("Create a project API key in ProjectMind settings.\n");
+    console.error("Run 'projectmind-agent setup' to configure.\n");
+    process.exit(1);
   }
 
   const mcpUrl = buildMcpUrl(
@@ -175,34 +275,31 @@ async function main(): Promise<void> {
 
   const allowlist = parseAllowlist(process.env.IMEMORY_WORKSPACE_ALLOWLIST);
   const info = collectMachineInfo();
-  const agentVersion = getAgentVersion();
-  const agentBuildDate = getAgentBuildDate();
   const install = detectInstall();
   const autoUpdate = isAutoUpdateEnabled();
   const updateCheckMs = autoUpdate ? parseUpdateCheckIntervalMs() : Number.POSITIVE_INFINITY;
   let lastUpdateCheckAt = 0;
+  
+  // Get available runners for startup banner
+  const { chain } = await resolveAutoRunnerChainWithDiagnostics();
+  showStartupBanner(agentVersion, agentBuildDate, chain);
 
-  console.log(`Connecting to ${mcpUrl.href}`);
-  console.log(`Agent key: ${info.agentKey}`);
-  console.log(`Agent version: ${agentVersion} (${install.kind})`);
-  if (agentBuildDate) console.log(`Agent build: ${agentBuildDate}`);
-  console.log(`Heartbeat interval: ${heartbeatMs}ms`);
-  console.log(`Job poll interval: ${jobPollMs}ms`);
-  if (autoUpdate) {
-    console.log(
-      `Auto-update: on (check every ${updateCheckMs}ms; set IMEMORY_AGENT_AUTO_UPDATE=0 to disable)`,
-    );
-  } else {
-    console.log("Auto-update: off");
-  }
+  console.log("Configuration:");
+  console.log(`  MCP URL: ${mcpUrl.href}`);
+  console.log(`  Agent key: ${info.agentKey}`);
+  console.log(`  Install: ${install.kind}`);
+  console.log(`  Heartbeat: ${heartbeatMs}ms`);
+  console.log(`  Job poll: ${jobPollMs}ms`);
+  console.log(`  Auto-update: ${autoUpdate ? "on" : "off"}`);
+  
   if (allowlist.length === 0) {
-    console.warn(
-      "Warning: IMEMORY_WORKSPACE_ALLOWLIST is empty — heartbeats work, but jobs will fail until set.",
-    );
+    console.warn("\n⚠️  Warning: IMEMORY_WORKSPACE_ALLOWLIST is empty");
+    console.warn("   Heartbeats work, but jobs will fail until configured.\n");
   } else {
-    console.log(`Workspace allowlist: ${allowlist.join(", ")}`);
+    console.log(`  Workspaces: ${allowlist.length} path(s)`);
   }
-  console.log("Ctrl+C to stop");
+  
+  console.log("\nPress Ctrl+C to stop\n");
 
   if (autoUpdate) {
     try {
