@@ -12,6 +12,7 @@ import {
   resolveArchiveEntryPath,
   gitEnvWithCredentials,
   resolveManagedRoot,
+  restoreWorkspaceDefaultBranch,
   type RunGit,
 } from "./managed-workspace.js";
 
@@ -279,6 +280,7 @@ describe("ensureManagedClone", () => {
     const { runGit, calls } = recordingGit((args) => {
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: "cafe123\n" };
       if (args[0] === "symbolic-ref") return { code: 0, stdout: "main\n" };
+      if (args[0] === "status") return { code: 0, stdout: "" };
       if (args[0] === "rev-parse") return { code: 0, stdout: "cafe123\n" };
       return { code: 0 };
     });
@@ -296,6 +298,31 @@ describe("ensureManagedClone", () => {
     expect(verbs).toContain("fetch");
     expect(verbs).not.toContain("checkout");
     expect(verbs).not.toContain("reset");
+  });
+
+  it("still hard-resets when on the target commit but the working tree is dirty", async () => {
+    const target = path.join(tmpRoot, "current-but-dirty");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: "cafe123\n" };
+      if (args[0] === "symbolic-ref") return { code: 0, stdout: "main\n" };
+      if (args[0] === "status") return { code: 0, stdout: " M leftover.ts\n" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: "cafe123\n" };
+      return { code: 0 };
+    });
+
+    const result = await ensureManagedClone({
+      localPath: target,
+      cloneUrl: "https://github.com/org/app.git",
+      defaultBranch: "main",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({ ok: true, created: false, headSha: "cafe123" });
+    expect(calls).toContainEqual(["checkout", "-f", "main"]);
+    expect(calls).toContainEqual(["reset", "--hard", "origin/main"]);
   });
 
   it("falls back to origin/HEAD when the named branch is missing", async () => {
@@ -318,7 +345,7 @@ describe("ensureManagedClone", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(calls).toContainEqual(["checkout", "trunk"]);
+    expect(calls).toContainEqual(["checkout", "-f", "trunk"]);
     expect(calls).toContainEqual(["reset", "--hard", "origin/trunk"]);
   });
 
@@ -600,7 +627,9 @@ describe("ensureUserWorkspace", () => {
     expect(flat.some((c) => c.startsWith("clean"))).toBe(false);
   });
 
-  it("refuses to switch branches when the tree has uncommitted changes", async () => {
+  it("auto-stashes dirty changes then switches to the default branch", async () => {
+    // Previous agent runs often leave allowlisted checkouts on a feature branch
+    // with uncommitted edits. Prepare must not fail — stash, then checkout.
     const target = path.join(tmpRoot, "user-dirty");
     fs.mkdirSync(path.join(target, ".git"), { recursive: true });
 
@@ -622,9 +651,39 @@ describe("ensureUserWorkspace", () => {
       runGit,
     });
 
+    expect(result).toEqual({ ok: true, created: false, headSha: "cafe123" });
+    const flat = calls.map((c) => c.join(" "));
+    expect(flat.some((c) => c.startsWith("stash push"))).toBe(true);
+    expect(flat).toContain("checkout main");
+    expect(flat.some((c) => c.startsWith("reset"))).toBe(false);
+  });
+
+  it("fails when auto-stash cannot preserve dirty work before a branch switch", async () => {
+    const target = path.join(tmpRoot, "user-stash-fail");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "feature/wip\n" };
+      }
+      if (args[0] === "status") return { code: 0, stdout: " M src/app.ts\n" };
+      if (args[0] === "stash") return { code: 1, stderr: "stash failed\n" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: "cafe123\n" };
+      return { code: 0 };
+    });
+
+    const result = await ensureUserWorkspace({
+      localPath: target,
+      cloneUrl: "https://github.com/org/app.git",
+      defaultBranch: "main",
+      credentials,
+      runGit,
+    });
+
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toContain("uncommitted changes");
+      expect(result.reason).toContain("auto-stash failed");
       expect(result.reason).toContain("retry");
     }
     expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("checkout"))).toBe(false);
@@ -699,5 +758,97 @@ describe("ensureUserWorkspace", () => {
 
     expect(result).toEqual({ ok: true, created: false, headSha: "local123" });
     expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("fetch"))).toBe(false);
+  });
+});
+
+describe("restoreWorkspaceDefaultBranch", () => {
+  it("checks out the default branch on an allowlisted feature-branch leftover", async () => {
+    const target = path.join(tmpRoot, "restore-allowlisted");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "feature/done\n" };
+      }
+      if (args[0] === "status") return { code: 0, stdout: "" };
+      return { code: 0 };
+    });
+
+    const result = await restoreWorkspaceDefaultBranch({
+      localPath: target,
+      defaultBranch: "main",
+      containment: "allowlisted",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      restored: true,
+      branch: "main",
+      detail: "checked out main",
+    });
+    expect(calls.map((c) => c.join(" "))).toContain("checkout main");
+    expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("reset"))).toBe(false);
+  });
+
+  it("stashes dirty allowlisted leftovers before returning to main", async () => {
+    const target = path.join(tmpRoot, "restore-dirty");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "feature/wip\n" };
+      }
+      if (args[0] === "status") return { code: 0, stdout: " M leftover.ts\n" };
+      return { code: 0 };
+    });
+
+    const result = await restoreWorkspaceDefaultBranch({
+      localPath: target,
+      defaultBranch: "main",
+      containment: "allowlisted",
+      credentials,
+      runGit,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.restored).toBe(true);
+    const flat = calls.map((c) => c.join(" "));
+    expect(flat.some((c) => c.startsWith("stash push"))).toBe(true);
+    expect(flat).toContain("checkout main");
+  });
+
+  it("hard-resets managed workspaces left on a feature branch", async () => {
+    const target = path.join(tmpRoot, "restore-managed");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "feature/done\n" };
+      }
+      if (args[0] === "status") return { code: 0, stdout: "" };
+      return { code: 0 };
+    });
+
+    const result = await restoreWorkspaceDefaultBranch({
+      localPath: target,
+      defaultBranch: "main",
+      containment: "managed",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      restored: true,
+      branch: "main",
+      detail: "hard-reset to origin/main",
+    });
+    expect(calls).toContainEqual(["checkout", "-f", "main"]);
+    expect(calls).toContainEqual(["reset", "--hard", "origin/main"]);
   });
 });

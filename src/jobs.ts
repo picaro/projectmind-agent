@@ -30,6 +30,7 @@ import {
   type WorkspaceContainment,
   type WorkspaceMode,
 } from "./workspace-manager.js";
+import { restoreWorkspaceDefaultBranch } from "./managed-workspace.js";
 import { ensureTaskWorktree } from "./task-worktree.js";
 import { prepareEnvironment } from "./environment-manager.js";
 import { errorCodeForPhase, reportPhase, type ExecutionLifecyclePhase } from "./execution-phase.js";
@@ -359,6 +360,14 @@ export async function executeClaimedJob(
   let renewCount = 0;
   let renewTimer: ReturnType<typeof setInterval> | null = null;
   let cancelPoll: ReturnType<typeof setInterval> | null = null;
+  // Set after a successful prepare so finally can return the base checkout to
+  // the default branch even when the job exits early (plan await, failure, …).
+  let hygiene: {
+    path: string;
+    containment: WorkspaceContainment;
+    mode: WorkspaceMode;
+    defaultBranch: string;
+  } | null = null;
   const renewLease = async (): Promise<void> => {
     try {
       const status = await getJobStatus(client, job.id);
@@ -527,6 +536,13 @@ export async function executeClaimedJob(
         await failWorkspace(prepared.reason);
         return;
       }
+
+      hygiene = {
+        path: prepared.path,
+        containment,
+        mode,
+        defaultBranch: repository?.defaultBranch?.trim() || "main",
+      };
 
       logLocal(job.id, `Workspace ready at ${prepared.path} (${prepared.action})`);
 
@@ -1251,6 +1267,33 @@ export async function executeClaimedJob(
       // best-effort complete
     }
   } finally {
+    // Best-effort: leave the prepared base checkout on the default branch so
+    // the next job is not blocked by a leftover feature branch / dirty tree.
+    // Task worktrees are separate; this restores the base path from prepare.
+    if (hygiene && hygiene.mode === "clone") {
+      try {
+        const restored = await restoreWorkspaceDefaultBranch({
+          localPath: hygiene.path,
+          defaultBranch: hygiene.defaultBranch,
+          containment: hygiene.containment,
+          credentials: gitCredentials
+            ? { username: gitCredentials.username, token: gitCredentials.token }
+            : null,
+          onLog: (line) => logLocal(job.id, line),
+        });
+        if (!restored.ok) {
+          logLocal(job.id, `Workspace cleanup skipped: ${restored.reason}`, "error");
+        } else if (restored.restored) {
+          logLocal(job.id, `Workspace cleanup: ${restored.detail}`);
+        }
+      } catch (err) {
+        logLocal(
+          job.id,
+          `Workspace cleanup threw: ${err instanceof Error ? err.message : err}`,
+          "error",
+        );
+      }
+    }
     stopLeaseKeepalive();
     // Never let one job's credential outlive it into the next.
     setActiveGitCredentials(null);

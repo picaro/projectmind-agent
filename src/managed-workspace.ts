@@ -429,10 +429,10 @@ export async function ensureManagedArchiveWorkspace(
  * This is the counterpart to ensureManagedClone for directories the agent does
  * not own. The difference is the whole point: a person may have uncommitted
  * edits in here, so there is no `reset --hard` and no `clean`. The tree is
- * fetched, the branch is checked out only when that is a safe (non-clobbering)
- * operation, and the update is a strict fast-forward. Anything that would
- * require discarding local state fails the job instead, with a message saying
- * what to fix — the user can then resolve it and retry.
+ * fetched, switched onto the default branch (auto-stashing when a previous agent
+ * left a dirty feature branch), and updated with a strict fast-forward. Local
+ * edits are never discarded — only stashed. Diverged history still fails the
+ * job with a message saying what to fix — the user can then resolve it and retry.
  *
  * Cloning into a missing/empty directory is still allowed: there is nothing to
  * lose, and naming a not-yet-existing folder is a supported way to configure one.
@@ -507,15 +507,28 @@ export async function ensureUserWorkspace(
   const current = await runGit(localPath, ["rev-parse", "--abbrev-ref", "HEAD"], input.credentials);
   const currentBranch = current.stdout.trim();
 
-  // `git checkout` refuses to clobber modified files on its own, so a dirty tree
-  // is only fatal when we actually need to switch branches.
+  // Agents often leave allowlisted checkouts on a feature branch with leftover
+  // edits. Stash (never discard) so prepare can switch to the default branch;
+  // the user can recover via `git stash list`.
   if (currentBranch !== targetBranch) {
     const status = await runGit(localPath, ["status", "--porcelain"], input.credentials);
     if (status.stdout.trim()) {
-      return {
-        ok: false,
-        reason: `workspace ${localPath} is on "${currentBranch}" with uncommitted changes and needs to be on "${targetBranch}". Commit, stash, or discard them and retry.`,
-      };
+      const stashMsg = `projectmind-agent: auto-stash before checkout ${targetBranch} (was ${currentBranch})`;
+      log(
+        `Stashing uncommitted changes on "${currentBranch}" before switching to "${targetBranch}"`,
+      );
+      const stashed = await runGit(
+        localPath,
+        ["stash", "push", "--include-untracked", "-m", stashMsg],
+        input.credentials,
+      );
+      if (stashed.code !== 0) {
+        return {
+          ok: false,
+          reason: `workspace ${localPath} is on "${currentBranch}" with uncommitted changes and needs to be on "${targetBranch}", but auto-stash failed: ${redactSecrets(stashed.stderr, secrets)}. Commit, stash, or discard them and retry.`,
+        };
+      }
+      log(`Stashed as "${stashMsg}" — recover with git stash list / git stash pop`);
     }
     const checkout = await runGit(localPath, ["checkout", targetBranch], input.credentials);
     if (checkout.code !== 0) {
@@ -624,9 +637,9 @@ export async function ensureManagedClone(
     targetSha = targetRef.code === 0 ? targetRef.stdout.trim() : null;
   }
 
-  // Idempotent no-op: if this checkout is already on the target branch at the
-  // target commit, skip checkout + reset entirely rather than re-running them
-  // for no effect on every call.
+  // Idempotent no-op only when the tree is also clean. A dirty working tree on
+  // the right SHA still needs reset — otherwise leftover agent edits survive
+  // into the next job (docs promise a hard-reset before every job).
   if (targetSha) {
     const currentBranch = await runGit(
       localPath,
@@ -634,18 +647,29 @@ export async function ensureManagedClone(
       input.credentials,
     );
     const currentSha = await runGit(localPath, ["rev-parse", "HEAD"], input.credentials);
+    const status = await runGit(localPath, ["status", "--porcelain"], input.credentials);
     if (
       currentBranch.code === 0 &&
       currentBranch.stdout.trim() === targetBranch &&
       currentSha.code === 0 &&
-      currentSha.stdout.trim() === targetSha
+      currentSha.stdout.trim() === targetSha &&
+      !status.stdout.trim()
     ) {
       log(`Already up to date at ${targetSha} (${targetBranch})`);
       return { ok: true, created: false, headSha: targetSha };
     }
   }
 
-  const checkout = await runGit(localPath, ["checkout", targetBranch], input.credentials);
+  // Force checkout: managed trees may be dirty from a prior job that skipped
+  // cleanup. `-f` discards conflicting worktree changes (safe: agent-owned).
+  let checkout = await runGit(localPath, ["checkout", "-f", targetBranch], input.credentials);
+  if (checkout.code !== 0) {
+    checkout = await runGit(
+      localPath,
+      ["checkout", "-f", "-B", targetBranch, `origin/${targetBranch}`],
+      input.credentials,
+    );
+  }
   if (checkout.code !== 0) {
     return { ok: false, reason: `git checkout failed: ${redactSecrets(checkout.stderr, secrets)}` };
   }
@@ -666,4 +690,162 @@ export async function ensureManagedClone(
 
   const head = await runGit(localPath, ["rev-parse", "HEAD"], input.credentials);
   return { ok: true, created: false, headSha: head.code === 0 ? head.stdout.trim() : null };
+}
+
+export type WorkspaceContainmentKind = "managed" | "allowlisted";
+
+export type RestoreWorkspaceDefaultBranchInput = {
+  localPath: string;
+  defaultBranch?: string | null;
+  containment: WorkspaceContainmentKind;
+  credentials?: GitCredentials | null;
+  onLog?: (line: string) => void;
+  runGit?: RunGit;
+};
+
+export type RestoreWorkspaceDefaultBranchResult =
+  | { ok: true; restored: boolean; branch: string; detail: string }
+  | { ok: false; reason: string };
+
+/**
+ * Post-job hygiene: leave the base checkout on the remote default branch so the
+ * next prepare is not blocked by a leftover feature branch.
+ *
+ * - managed: force-match origin/<default> (same contract as prepare)
+ * - allowlisted: stash if dirty, then checkout (never reset --hard)
+ *
+ * Best-effort: callers should log failures and not fail the job over this.
+ */
+export async function restoreWorkspaceDefaultBranch(
+  input: RestoreWorkspaceDefaultBranchInput,
+): Promise<RestoreWorkspaceDefaultBranchResult> {
+  const runGit = input.runGit ?? runGitCommand;
+  const secrets = input.credentials?.token ? [input.credentials.token] : [];
+  const log = (line: string) => input.onLog?.(redactSecrets(line, secrets));
+
+  const localPath = path.resolve(input.localPath);
+  if (!isGitRepo(localPath)) {
+    return { ok: true, restored: false, branch: "", detail: "not a git repository — skipped" };
+  }
+
+  const branch = input.defaultBranch?.trim() || "main";
+  const origin = await runGit(localPath, ["remote", "get-url", "origin"], input.credentials);
+  if (origin.code !== 0 || !origin.stdout.trim()) {
+    return {
+      ok: true,
+      restored: false,
+      branch: "",
+      detail: "no origin remote — left checkout as-is",
+    };
+  }
+
+  let targetBranch = branch;
+  const remoteRef = await runGit(
+    localPath,
+    ["rev-parse", "--verify", `origin/${branch}`],
+    input.credentials,
+  );
+  if (remoteRef.code !== 0) {
+    const symbolic = await runGit(
+      localPath,
+      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      input.credentials,
+    );
+    const detected = symbolic.stdout.trim().replace(/^origin\//, "");
+    if (symbolic.code !== 0 || !detected) {
+      return {
+        ok: false,
+        reason: `cannot resolve origin/${branch} or origin/HEAD in ${localPath}`,
+      };
+    }
+    targetBranch = detected;
+  }
+
+  const current = await runGit(localPath, ["rev-parse", "--abbrev-ref", "HEAD"], input.credentials);
+  const currentBranch = current.code === 0 ? current.stdout.trim() : "";
+  const status = await runGit(localPath, ["status", "--porcelain"], input.credentials);
+  const dirty = Boolean(status.stdout.trim());
+
+  if (input.containment === "managed") {
+    if (currentBranch === targetBranch && !dirty) {
+      return {
+        ok: true,
+        restored: false,
+        branch: targetBranch,
+        detail: `already on ${targetBranch} (clean)`,
+      };
+    }
+    log(`Cleanup: restoring managed workspace to origin/${targetBranch}`);
+    let checkout = await runGit(localPath, ["checkout", "-f", targetBranch], input.credentials);
+    if (checkout.code !== 0) {
+      checkout = await runGit(
+        localPath,
+        ["checkout", "-f", "-B", targetBranch, `origin/${targetBranch}`],
+        input.credentials,
+      );
+    }
+    if (checkout.code !== 0) {
+      return {
+        ok: false,
+        reason: `git checkout failed: ${redactSecrets(checkout.stderr, secrets)}`,
+      };
+    }
+    const reset = await runGit(
+      localPath,
+      ["reset", "--hard", `origin/${targetBranch}`],
+      input.credentials,
+    );
+    if (reset.code !== 0) {
+      return { ok: false, reason: `git reset failed: ${redactSecrets(reset.stderr, secrets)}` };
+    }
+    return {
+      ok: true,
+      restored: true,
+      branch: targetBranch,
+      detail: `hard-reset to origin/${targetBranch}`,
+    };
+  }
+
+  // allowlisted
+  if (currentBranch === targetBranch) {
+    return {
+      ok: true,
+      restored: false,
+      branch: targetBranch,
+      detail: `already on ${targetBranch}`,
+    };
+  }
+
+  if (dirty) {
+    const stashMsg = `projectmind-agent: auto-stash after job before checkout ${targetBranch} (was ${currentBranch})`;
+    log(`Cleanup: stashing leftover changes on "${currentBranch}" before returning to "${targetBranch}"`);
+    const stashed = await runGit(
+      localPath,
+      ["stash", "push", "--include-untracked", "-m", stashMsg],
+      input.credentials,
+    );
+    if (stashed.code !== 0) {
+      return {
+        ok: false,
+        reason: `auto-stash before cleanup checkout failed: ${redactSecrets(stashed.stderr, secrets)}`,
+      };
+    }
+    log(`Stashed as "${stashMsg}" — recover with git stash list / git stash pop`);
+  }
+
+  log(`Cleanup: checking out ${targetBranch}`);
+  const checkout = await runGit(localPath, ["checkout", targetBranch], input.credentials);
+  if (checkout.code !== 0) {
+    return {
+      ok: false,
+      reason: `git checkout ${targetBranch} failed: ${redactSecrets(checkout.stderr, secrets)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    restored: true,
+    branch: targetBranch,
+    detail: `checked out ${targetBranch}`,
+  };
 }

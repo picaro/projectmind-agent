@@ -39,7 +39,9 @@ import { effectiveAllowlist, ensureAllowlistedWorkspace } from "./safety.js";
  * `managed`     — the agent picked it under the root it advertises. Agent-owned
  *                 and disposable, so it is reset to match the remote exactly.
  * `allowlisted` — a person named it in the setup wizard. It may contain their
- *                 uncommitted work, so it is only ever fast-forwarded.
+ *                 uncommitted work, so prepare never hard-resets: it fast-forwards
+ *                 and auto-stashes when a leftover feature branch would block a
+ *                 switch to the default branch.
  */
 export type WorkspaceContainment = "managed" | "allowlisted";
 
