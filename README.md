@@ -2,7 +2,7 @@
 
 > **Desktop agent that connects your local machine to ProjectMind and executes AI coding tasks using your preferred AI assistant.**
 
-[![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)](https://github.com/projectmind/projectmind-agent)
+[![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)](https://github.com/projectmind/projectmind-agent)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Ubuntu-lightgrey.svg)]()
 
 ## Quick Start

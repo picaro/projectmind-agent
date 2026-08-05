@@ -6,6 +6,7 @@
  *
  * Usage: node scripts/build-release.mjs
  * Env:
+ *   AGENT_RELEASE_OUT=/path/to/public/downloads/agent — output directory
  *   AGENT_RELEASE_NODEJS_ONLY=1 — skip native pkg binaries
  *   AGENT_RELEASE_ONLY=ubuntu-x64,macos-arm64 — build only listed native ids
  */
@@ -26,7 +27,10 @@ import { writeClearQuarantineHelper, writePackagedReadme } from "./packaged-read
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentRoot = resolve(__dirname, "..");
 const repoRoot = resolve(agentRoot, "..");
-const outPublic = resolve(repoRoot, "public/downloads/agent");
+/** Override when the agent lives outside the ProjectMind repo (e.g. managed workspace). */
+const outPublic = process.env.AGENT_RELEASE_OUT
+  ? resolve(process.env.AGENT_RELEASE_OUT)
+  : resolve(repoRoot, "public/downloads/agent");
 const distDir = resolve(agentRoot, "dist-release");
 const binDir = resolve(distDir, "bin");
 const stageDir = resolve(distDir, "stage");
@@ -290,7 +294,7 @@ async function main() {
   );
   await writeFile(
     join(outPublic, "README.md"),
-    `# ProjectMind desktop agent downloads\n\nVersion **${version}** (unsigned zip).\n\nIncludes native macOS / Windows / Ubuntu binaries and a **Node.js** cross-platform zip.\n\nEach zip includes a **platform-specific \`README.txt\`** (how to run on that OS), plus a sample **\`.env\`** (and \`.env.example\`) pointed at \`https://projectm.dev/api/mcp\` — edit your API key and workspace allowlist before running.\n\n| Zip | Run |\n| --- | --- |\n| macOS | \`./imemory-agent\` (clear quarantine first) |\n| Windows | \`.\\\\imemory-agent.exe\` |\n| Ubuntu | \`chmod +x ./imemory-agent && ./imemory-agent\` |\n| Node.js | \`npm install && npm start\` (Node 22.13+; not bare \`npm run\`) |\n\n**macOS trust:** after unzip, run \`xattr -dr com.apple.quarantine .\` (or double-click \`clear-quarantine.command\` in the macOS zip), or System Settings → Privacy & Security → Open Anyway. See \`mac-agent/README.md\`.\n\nBuilt by \`npm run build:release --prefix mac-agent\`.\n`,
+    `# ProjectMind desktop agent downloads\n\nVersion **${version}** (unsigned zip).\n\nIncludes native macOS / Windows / Ubuntu binaries and a **Node.js** cross-platform zip.\n\nEach zip includes a **platform-specific \`README.txt\`** (how to run on that OS), plus a sample **\`.env\`** (and \`.env.example\`) pointed at \`https://projectm.dev/api/mcp\` — edit your API key and workspace allowlist before running.\n\n| Zip | Run |\n| --- | --- |\n| macOS | \`./projectmind-agent\` (clear quarantine first) |\n| Windows | \`.\\\\projectmind-agent.exe\` |\n| Ubuntu | \`chmod +x ./projectmind-agent && ./projectmind-agent\` |\n| Node.js | \`npm install && npm start\` (Node 22.13+; not bare \`npm run\`) |\n\n**macOS trust:** after unzip, run \`xattr -dr com.apple.quarantine .\` (or double-click \`clear-quarantine.command\` in the macOS zip), or System Settings → Privacy & Security → Open Anyway.\n\nBuilt by \`npm run build:release\` in the projectmind-agent repo.\n`,
     "utf8",
   );
 
