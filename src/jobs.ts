@@ -51,6 +51,17 @@ import {
   listChangedFilesFromHead,
   readGitMeta,
 } from "./visual-capture.js";
+import { getAgentVersion } from "./agent-version.js";
+import {
+  LEASE_RENEW_MS,
+  clearActiveJob,
+  formatLeaseKeepaliveStartMessage,
+  formatLeaseRenewAbortMessage,
+  formatLeaseRenewFailureMessage,
+  formatLeaseRenewSuccessMessage,
+  setActiveJob,
+  shouldAbortAfterRenewFailures,
+} from "./lease-keepalive.js";
 
 export type ClaimedJob = {
   id: string;
@@ -128,7 +139,6 @@ export type ClaimedJobPayload = {
   cooldowns?: Array<{ runner: string; cooldown_until: string | null }>;
 };
 
-const LEASE_RENEW_MS = 60_000;
 const CONSOLE_LOG_CHARS = 4_000;
 const DEFAULT_CLAUDE_USAGE_LIMIT_PERCENT = 90;
 const DEFAULT_CLAUDE_USAGE_COOLDOWN_MS = 30 * 60_000;
@@ -333,6 +343,7 @@ export async function executeClaimedJob(
   modelGateway?: ClaimedJobPayload["modelGateway"],
 ): Promise<void> {
   const startedAt = Date.now();
+  setActiveJob(job.id, agentKey);
   logLocal(
     job.id,
     `Starting execute: runner=${job.runner || "auto"} model=${job.model || "default"} phase=${job.phase ?? "implement"} task=${job.task_id} cwd=${job.local_directory}`,
@@ -358,6 +369,7 @@ export async function executeClaimedJob(
   // AGENT_JOB_LEASE_TTL_MS (2 min) and used to expire the claim with zero renewals.
   const abort = new AbortController();
   let renewCount = 0;
+  let consecutiveRenewFailures = 0;
   let renewTimer: ReturnType<typeof setInterval> | null = null;
   let cancelPoll: ReturnType<typeof setInterval> | null = null;
   // Set after a successful prepare so finally can return the base checkout to
@@ -368,6 +380,16 @@ export async function executeClaimedJob(
     mode: WorkspaceMode;
     defaultBranch: string;
   } | null = null;
+  const stopLeaseKeepalive = (): void => {
+    if (renewTimer != null) {
+      clearInterval(renewTimer);
+      renewTimer = null;
+    }
+    if (cancelPoll != null) {
+      clearInterval(cancelPoll);
+      cancelPoll = null;
+    }
+  };
   const renewLease = async (): Promise<void> => {
     try {
       const status = await getJobStatus(client, job.id);
@@ -384,27 +406,63 @@ export async function executeClaimedJob(
         jobId: job.id,
         agentKey,
       });
-      logLocal(job.id, `Lease renewed (#${renewCount}), status=${status ?? "?"}`);
-    } catch (err) {
-      logLocal(
-        job.id,
-        `Lease renew failed: ${err instanceof Error ? err.message : err}`,
-        "error",
+      consecutiveRenewFailures = 0;
+      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+      const successMsg = formatLeaseRenewSuccessMessage({
+        renewCount,
+        elapsedSec,
+        phase: currentPhase,
+        jobStatus: status ?? "?",
+      });
+      logLocal(job.id, successMsg);
+      await appendLog(client, job.id, agentKey, successMsg, renewCount === 1 ? "status" : "log").catch(
+        () => {
+          // best-effort: never fail the renew path because logging failed
+        },
       );
-    }
-  };
-  const stopLeaseKeepalive = (): void => {
-    if (renewTimer != null) {
-      clearInterval(renewTimer);
-      renewTimer = null;
-    }
-    if (cancelPoll != null) {
-      clearInterval(cancelPoll);
-      cancelPoll = null;
+    } catch (err) {
+      consecutiveRenewFailures += 1;
+      const errText = err instanceof Error ? err.message : String(err);
+      const failMsg = formatLeaseRenewFailureMessage({
+        renewCount,
+        consecutiveFailures: consecutiveRenewFailures,
+        error: errText,
+      });
+      logLocal(job.id, failMsg, "error");
+      await appendLog(client, job.id, agentKey, failMsg, "error").catch(() => {});
+      if (shouldAbortAfterRenewFailures(consecutiveRenewFailures)) {
+        const abortMsg = formatLeaseRenewAbortMessage({
+          consecutiveFailures: consecutiveRenewFailures,
+          error: errText,
+        });
+        logLocal(job.id, abortMsg, "error");
+        await appendLog(client, job.id, agentKey, abortMsg, "error").catch(() => {});
+        abort.abort();
+        stopLeaseKeepalive();
+        try {
+          await callToolJson(client, "completeAgentJob", {
+            jobId: job.id,
+            agentKey,
+            status: "failed",
+            error: abortMsg,
+            errorCode: errorCodeForPhase(currentPhase),
+            updateTask: false,
+          });
+        } catch {
+          // best-effort; control plane may still mark AGENT_LOST if this fails
+        }
+      }
     }
   };
 
   try {
+    const startMsg = formatLeaseKeepaliveStartMessage({
+      agentVersion: getAgentVersion(),
+      pid: process.pid,
+    });
+    logLocal(job.id, startMsg);
+    await appendLog(client, job.id, agentKey, startMsg, "status").catch(() => {});
+
     await renewLease();
     renewTimer = setInterval(() => {
       void renewLease();
@@ -1295,6 +1353,7 @@ export async function executeClaimedJob(
       }
     }
     stopLeaseKeepalive();
+    clearActiveJob(job.id);
     // Never let one job's credential outlive it into the next.
     setActiveGitCredentials(null);
     logLocal(job.id, `Done (total ${Date.now() - startedAt}ms)`);

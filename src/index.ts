@@ -17,6 +17,11 @@ import { runHealthCheck } from "./health-check.js";
 import { resolveManagedRoot } from "./managed-workspace.js";
 import { getAgentBuildDate, getAgentVersion } from "./agent-version.js";
 import {
+  clearActiveJob,
+  formatAgentShutdownFarewellMessage,
+  getActiveJob,
+} from "./lease-keepalive.js";
+import {
   detectInstall,
   isAutoUpdateEnabled,
   maybeSelfUpdate,
@@ -321,20 +326,42 @@ async function main(): Promise<void> {
   let heartbeatInFlight = false;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
-  const shutdown = async () => {
+  const shutdown = async (signal = "shutdown") => {
     if (stopping) return;
     stopping = true;
     console.log("\nShutting down…");
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    const active = getActiveJob();
+    if (active) {
+      const message = formatAgentShutdownFarewellMessage({
+        jobId: active.jobId,
+        signal,
+      });
+      console.error(message);
+      try {
+        await callToolJson(client, "appendAgentJobEvent", {
+          jobId: active.jobId,
+          agentKey: active.agentKey,
+          message,
+          kind: "error",
+        });
+      } catch (err) {
+        console.error(
+          "Failed to report shutdown farewell:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+      clearActiveJob(active.jobId);
+    }
     await client.close().catch(() => {});
     process.exit(0);
   };
 
   process.on("SIGINT", () => {
-    void shutdown();
+    void shutdown("SIGINT");
   });
   process.on("SIGTERM", () => {
-    void shutdown();
+    void shutdown("SIGTERM");
   });
 
   // Heartbeat on its own timer so long-running jobs still mark the agent online.
