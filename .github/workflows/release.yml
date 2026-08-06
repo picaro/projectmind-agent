@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "v$VERSION" ] && [ "$TAG" != "$VERSION" ]; then
+            echo "Tag $TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+      - run: npm test
+
+  build-macos:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Build macOS release artifacts
+        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_ONLY=macos-arm64,macos-x64 npm run build:release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: release/*.zip
+          if-no-files-found: error
+
+  build-linux:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Build Linux and Windows release artifacts
+        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_ONLY=windows-x64,ubuntu-x64 npm run build:release
+      - name: Build Node.js release artifact
+        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_NODEJS_ONLY=1 npm run build:release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: release/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Merge release artifacts
+        run: |
+          mkdir -p release
+          cp artifacts/release-macos/*.zip release/
+          cp artifacts/release-linux/*.zip release/
+          node scripts/merge-release-artifacts.mjs release
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.zip
+            release/manifest.json
+            release/README.md
+          generate_release_notes: true

@@ -23,6 +23,7 @@ import {
   writePostinstallHint,
 } from "./packaged-nodejs.mjs";
 import { writeClearQuarantineHelper, writePackagedReadme } from "./packaged-readme.mjs";
+import { NATIVE_TARGETS, NODEJS_TARGET, releaseReadme } from "./release-assets.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentRoot = resolve(__dirname, "..");
@@ -39,48 +40,7 @@ const require = createRequire(import.meta.url);
 const pkgJson = JSON.parse(await readFile(resolve(agentRoot, "package.json"), "utf8"));
 const version = String(pkgJson.version || "0.0.0");
 
-const TARGETS = [
-  {
-    id: "macos-arm64",
-    label: "macOS (Apple Silicon)",
-    os: "macos",
-    arch: "arm64",
-    pkgTarget: "node22-macos-arm64",
-    binaryName: "projectmind-agent",
-    zipName: "projectmind-agent-macos-arm64.zip",
-    bytes: 0,
-  },
-  {
-    id: "macos-x64",
-    label: "macOS (Intel)",
-    os: "macos",
-    arch: "x64",
-    pkgTarget: "node22-macos-x64",
-    binaryName: "projectmind-agent",
-    zipName: "projectmind-agent-macos-x64.zip",
-    bytes: 0,
-  },
-  {
-    id: "windows-x64",
-    label: "Windows (x64)",
-    os: "windows",
-    arch: "x64",
-    pkgTarget: "node22-win-x64",
-    binaryName: "projectmind-agent.exe",
-    zipName: "projectmind-agent-windows-x64.zip",
-    bytes: 0,
-  },
-  {
-    id: "ubuntu-x64",
-    label: "Ubuntu (x64)",
-    os: "ubuntu",
-    arch: "x64",
-    pkgTarget: "node22-linux-x64",
-    binaryName: "projectmind-agent",
-    zipName: "projectmind-agent-ubuntu-x64.zip",
-    bytes: 0,
-  },
-];
+const TARGETS = NATIVE_TARGETS.map((target) => ({ ...target, bytes: 0 }));
 
 const onlyNativeIds = (process.env.AGENT_RELEASE_ONLY ?? "")
   .split(",")
@@ -127,14 +87,7 @@ async function zipFolder(folder, zipPath) {
   run("zip", ["-r", "-q", zipPath, "."], { cwd: folder });
 }
 
-const NODEJS_TARGET = {
-  id: "nodejs",
-  label: "Node.js (cross-platform)",
-  os: "nodejs",
-  arch: "any",
-  zipName: "projectmind-agent-nodejs.zip",
-  bytes: 0,
-};
+const nodejsTarget = { ...NODEJS_TARGET, bytes: 0 };
 
 /** Set AGENT_RELEASE_NODEJS_ONLY=1 to skip native pkg binaries (faster local rebuild). */
 const nodejsOnly = process.env.AGENT_RELEASE_NODEJS_ONLY === "1";
@@ -159,13 +112,13 @@ function applyExistingBytes(targets, existingAssets) {
 
 async function packageNodejsZip(bundlePath) {
   console.log("Packaging nodejs…");
-  const stage = join(stageDir, NODEJS_TARGET.id);
+  const stage = join(stageDir, nodejsTarget.id);
   await rm(stage, { recursive: true, force: true });
   await mkdir(stage, { recursive: true });
 
   await copyFile(bundlePath, join(stage, "projectmind-agent.cjs"));
   await writePackagedEnvFiles(stage, agentRoot);
-  await writeSetupReadme(stage, NODEJS_TARGET);
+  await writeSetupReadme(stage, nodejsTarget);
 
   const cursorSdkRange =
     pkgJson.dependencies?.["@cursor/sdk"] ?? pkgJson.devDependencies?.["@cursor/sdk"] ?? "^1.0.24";
@@ -174,12 +127,12 @@ async function packageNodejsZip(bundlePath) {
   await writePostinstallHint(stage);
   await writeNodejsStartHelper(stage);
 
-  const zipPath = join(outPublic, NODEJS_TARGET.zipName);
+  const zipPath = join(outPublic, nodejsTarget.zipName);
   await zipFolder(stage, zipPath);
   const st = await stat(zipPath);
   console.log(`  → ${zipPath} (${st.size} bytes)`);
-  NODEJS_TARGET.bytes = st.size;
-  return NODEJS_TARGET;
+  nodejsTarget.bytes = st.size;
+  return nodejsTarget;
 }
 
 async function main() {
@@ -271,7 +224,7 @@ async function main() {
 
   const packaged = [
     ...TARGETS.map((t) => packagedById.get(t.id)),
-    packagedById.get(NODEJS_TARGET.id),
+    packagedById.get(nodejsTarget.id),
   ].filter(Boolean);
 
   const manifest = {
@@ -292,11 +245,7 @@ async function main() {
     `${JSON.stringify(manifest, null, 2)}\n`,
     "utf8",
   );
-  await writeFile(
-    join(outPublic, "README.md"),
-    `# ProjectMind desktop agent downloads\n\nVersion **${version}** (unsigned zip).\n\nIncludes native macOS / Windows / Ubuntu binaries and a **Node.js** cross-platform zip.\n\nEach zip includes a **platform-specific \`README.txt\`** (how to run on that OS), plus a sample **\`.env\`** (and \`.env.example\`) pointed at \`https://projectm.dev/api/mcp\` — edit your API key and workspace allowlist before running.\n\n| Zip | Run |\n| --- | --- |\n| macOS | \`./projectmind-agent\` (clear quarantine first) |\n| Windows | \`.\\\\projectmind-agent.exe\` |\n| Ubuntu | \`chmod +x ./projectmind-agent && ./projectmind-agent\` |\n| Node.js | \`npm install && npm start\` (Node 22.13+; not bare \`npm run\`) |\n\n**macOS trust:** after unzip, run \`xattr -dr com.apple.quarantine .\` (or double-click \`clear-quarantine.command\` in the macOS zip), or System Settings → Privacy & Security → Open Anyway.\n\nBuilt by \`npm run build:release\` in the projectmind-agent repo.\n`,
-    "utf8",
-  );
+  await writeFile(join(outPublic, "README.md"), releaseReadme(version), "utf8");
 
   console.log("Done. Artifacts in public/downloads/agent/");
 }
