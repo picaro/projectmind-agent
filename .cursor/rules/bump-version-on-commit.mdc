@@ -1,0 +1,28 @@
+---
+description: Bump package version on every commit
+alwaysApply: true
+---
+
+# Bump Version On Commit
+
+Before creating any git commit in this repo, bump the package version and include it in that commit.
+
+## Required steps
+
+1. Bump the patch version with:
+   ```bash
+   npm version patch --no-git-tag-version
+   ```
+2. Stage `package.json` and `package-lock.json` with the rest of the commit.
+3. Do not create a git tag as part of the bump (`--no-git-tag-version` handles this).
+
+## Exceptions
+
+- Skip the bump only if the commit already includes a version change (for example an intentional minor/major bump).
+- Prefer patch bumps for routine commits. Use `npm version minor` or `npm version major` (also with `--no-git-tag-version`) only when the user explicitly asks for that level.
+
+## Do not
+
+- Commit without updating `version` in `package.json`
+- Leave `package-lock.json` out of sync with `package.json`
+- Run `npm version` in a way that creates a separate bump-only commit or git tag
