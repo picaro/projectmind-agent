@@ -1,4 +1,4 @@
-# ProjectMind desktop agent (v0.2.4) - Advanced Documentation
+# ProjectMind desktop agent (v0.2.5) - Advanced Documentation
 
 Long-running **macOS / Windows / Ubuntu** CLI that:
 
@@ -105,10 +105,13 @@ creates it under `IMEMORY_MANAGED_WORKSPACE_ROOT`
   point managed mode at a directory holding work you care about; if the path
   exists but is not a git repository, the agent refuses rather than deleting
   it. A local-only (`git init`) workspace is never reset — it holds the only copy.
-- An allowlisted (user-configured) checkout is never hard-reset. Prepare and
-  post-job cleanup switch it back to the default branch, auto-stashing any
-  leftover dirty work so the next job is not blocked. Recover stashes with
-  `git stash list` / `git stash pop`.
+- An allowlisted (user-configured) checkout is never hard-reset while dirty.
+  Prepare and post-job cleanup switch it back to the default branch, auto-stashing
+  any leftover dirty work so the next job is not blocked. Recover stashes with
+  `git stash list` / `git stash pop`. Clean but diverged default-branch history
+  (typical after a failed push of an agent commit on `main`) is hard-reset to
+  `origin/<default>` so the next job is not stuck. Paths under the managed
+  workspace root are always treated as managed even if the claim said allowlisted.
 
 Install CLIs on PATH when using those runners:
 

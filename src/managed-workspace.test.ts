@@ -689,16 +689,46 @@ describe("ensureUserWorkspace", () => {
     expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("checkout"))).toBe(false);
   });
 
-  it("fails with an actionable message when the branch has diverged", async () => {
-    const target = path.join(tmpRoot, "user-diverged");
+  it("hard-resets a clean diverged checkout to origin (failed-push leftover)", async () => {
+    const target = path.join(tmpRoot, "user-diverged-clean");
     fs.mkdirSync(path.join(target, ".git"), { recursive: true });
 
-    const { runGit } = recordingGit((args) => {
+    const { runGit, calls } = recordingGit((args) => {
       if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
         return { code: 0, stdout: "main\n" };
       }
       if (args[0] === "merge") return { code: 1 };
+      if (args[0] === "status") return { code: 0, stdout: "" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: "origindead\n" };
+      return { code: 0 };
+    });
+
+    const result = await ensureUserWorkspace({
+      localPath: target,
+      cloneUrl: "https://github.com/org/app.git",
+      defaultBranch: "main",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({ ok: true, created: false, headSha: "origindead" });
+    const flat = calls.map((c) => c.join(" "));
+    expect(flat).toContain("merge --ff-only origin/main");
+    expect(flat).toContain("reset --hard origin/main");
+  });
+
+  it("fails when diverged and the working tree is dirty", async () => {
+    const target = path.join(tmpRoot, "user-diverged-dirty");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "main\n" };
+      }
+      if (args[0] === "merge") return { code: 1 };
+      if (args[0] === "status") return { code: 0, stdout: " M src/app.ts\n" };
       if (args[0] === "rev-parse") return { code: 0, stdout: "cafe123\n" };
       return { code: 0 };
     });
@@ -716,6 +746,7 @@ describe("ensureUserWorkspace", () => {
       expect(result.reason).toContain("diverged");
       expect(result.reason).toContain("retry");
     }
+    expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("reset"))).toBe(false);
   });
 
   it("refuses a non-empty directory that is not a repository", async () => {
@@ -830,6 +861,12 @@ describe("restoreWorkspaceDefaultBranch", () => {
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
         return { code: 0, stdout: "feature/done\n" };
       }
+      if (args[0] === "rev-parse" && args[1] === "--verify") {
+        return { code: 0, stdout: "originmain\n" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        return { code: 0, stdout: "localscha\n" };
+      }
       if (args[0] === "status") return { code: 0, stdout: "" };
       return { code: 0 };
     });
@@ -849,6 +886,78 @@ describe("restoreWorkspaceDefaultBranch", () => {
       detail: "hard-reset to origin/main",
     });
     expect(calls).toContainEqual(["checkout", "-f", "main"]);
+    expect(calls).toContainEqual(["reset", "--hard", "origin/main"]);
+  });
+
+  it("hard-resets managed workspaces that stayed on main but diverged from origin", async () => {
+    const target = path.join(tmpRoot, "restore-managed-diverged");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "main\n" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--verify") {
+        return { code: 0, stdout: "originmain\n" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        return { code: 0, stdout: "localonly\n" };
+      }
+      if (args[0] === "status") return { code: 0, stdout: "" };
+      return { code: 0 };
+    });
+
+    const result = await restoreWorkspaceDefaultBranch({
+      localPath: target,
+      defaultBranch: "main",
+      containment: "managed",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      restored: true,
+      branch: "main",
+      detail: "hard-reset to origin/main",
+    });
+    expect(calls).toContainEqual(["reset", "--hard", "origin/main"]);
+  });
+
+  it("hard-resets a clean allowlisted main that diverged from origin", async () => {
+    const target = path.join(tmpRoot, "restore-allowlisted-diverged");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+
+    const { runGit, calls } = recordingGit((args) => {
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "main\n" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--verify") {
+        return { code: 0, stdout: "originmain\n" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        return { code: 0, stdout: "localonly\n" };
+      }
+      if (args[0] === "status") return { code: 0, stdout: "" };
+      return { code: 0 };
+    });
+
+    const result = await restoreWorkspaceDefaultBranch({
+      localPath: target,
+      defaultBranch: "main",
+      containment: "allowlisted",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      restored: true,
+      branch: "main",
+      detail: "hard-reset clean diverged main to origin/main",
+    });
     expect(calls).toContainEqual(["reset", "--hard", "origin/main"]);
   });
 });

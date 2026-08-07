@@ -39,9 +39,12 @@ import { effectiveAllowlist, ensureAllowlistedWorkspace } from "./safety.js";
  * `managed`     — the agent picked it under the root it advertises. Agent-owned
  *                 and disposable, so it is reset to match the remote exactly.
  * `allowlisted` — a person named it in the setup wizard. It may contain their
- *                 uncommitted work, so prepare never hard-resets: it fast-forwards
- *                 and auto-stashes when a leftover feature branch would block a
- *                 switch to the default branch.
+ *                 uncommitted work, so prepare never hard-resets a dirty tree: it
+ *                 fast-forwards and auto-stashes when a leftover feature branch
+ *                 would block a switch to the default branch. Clean diverged
+ *                 history is hard-reset so jobs are not stuck after a failed push.
+ *                 Paths that resolve under the agent's managed root are always
+ *                 treated as managed, even if the claim said allowlisted.
  */
 export type WorkspaceContainment = "managed" | "allowlisted";
 
@@ -102,10 +105,25 @@ export async function prepareWorkspace(
   // Re-derive the boundary from THIS agent's own environment. A path handed over
   // by the control plane is a request, never an authorization — which is why the
   // check happens here and not on the server.
+  //
+  // Paths under the managed root are always agent-owned, even if the claim
+  // mistakenly labeled them allowlisted (e.g. a hand-picked dir that happens to
+  // live under ~/.imemory/workspaces).
+  const managedRoot = resolveManagedRoot();
+  const underManaged = assertPathInsideManagedRoot(requested, managedRoot);
+  const containment: WorkspaceContainment = underManaged.ok ? "managed" : input.containment;
+  if (underManaged.ok && input.containment === "allowlisted") {
+    input.onLog?.(
+      `Path ${underManaged.path} is under managed workspace root — treating as managed (hard-reset)`,
+    );
+  }
+
   const inside =
-    input.containment === "allowlisted"
+    containment === "allowlisted"
       ? ensureAllowlistedWorkspace(requested, effectiveAllowlist())
-      : assertPathInsideManagedRoot(requested, resolveManagedRoot());
+      : underManaged.ok
+        ? underManaged
+        : assertPathInsideManagedRoot(requested, managedRoot);
   if (!inside.ok) return fail(inside.reason);
 
   const localPath = inside.path;
@@ -142,8 +160,8 @@ export async function prepareWorkspace(
     : wantsEmpty
       ? await ensureManagedEmptyWorkspace({ localPath, onLog, runGit: input.runGit })
       : // The containment split is the safety-critical line: only a directory the
-        // agent owns may be force-matched to the remote.
-        await (input.containment === "managed" ? ensureManagedClone : ensureUserWorkspace)({
+        // agent owns may be force-matched to the remote on every prepare.
+        await (containment === "managed" ? ensureManagedClone : ensureUserWorkspace)({
           localPath,
           cloneUrl: cloneUrl!,
           defaultBranch,

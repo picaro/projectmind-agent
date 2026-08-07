@@ -9,11 +9,17 @@ const credentials = { username: "x-access-token", token: "ghs_AAAAAAAAAAAAAAAAAA
 const repository = { cloneUrl: "https://github.com/org/app.git", defaultBranch: "main" };
 
 let tmpRoot: string;
+let managedRoot: string;
+let allowRoot: string;
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pm-prepare-"));
-  process.env.IMEMORY_MANAGED_WORKSPACE_ROOT = tmpRoot;
-  process.env.IMEMORY_WORKSPACE_ALLOWLIST = tmpRoot;
+  managedRoot = path.join(tmpRoot, "managed");
+  allowRoot = path.join(tmpRoot, "allow");
+  fs.mkdirSync(managedRoot, { recursive: true });
+  fs.mkdirSync(allowRoot, { recursive: true });
+  process.env.IMEMORY_MANAGED_WORKSPACE_ROOT = managedRoot;
+  process.env.IMEMORY_WORKSPACE_ALLOWLIST = allowRoot;
 });
 
 afterEach(() => {
@@ -58,7 +64,7 @@ const headStub = (args: string[]) =>
 
 describe("prepareWorkspace containment routing", () => {
   it("hard-resets an agent-owned (managed) checkout", async () => {
-    const target = path.join(tmpRoot, "managed-app");
+    const target = path.join(managedRoot, "managed-app");
     fs.mkdirSync(path.join(target, ".git"), { recursive: true });
     const { runGit, calls } = fakeGit(headStub);
 
@@ -75,9 +81,9 @@ describe("prepareWorkspace containment routing", () => {
     expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("reset --hard"))).toBe(true);
   });
 
-  it("never resets a user-configured (allowlisted) checkout", async () => {
-    // The core safety guarantee of this refactor.
-    const target = path.join(tmpRoot, "user-app");
+  it("never resets a user-configured (allowlisted) checkout outside the managed root", async () => {
+    // The core safety guarantee of this refactor for personal directories.
+    const target = path.join(allowRoot, "user-app");
     fs.mkdirSync(path.join(target, ".git"), { recursive: true });
     const { runGit, calls } = fakeGit(headStub);
 
@@ -96,10 +102,31 @@ describe("prepareWorkspace containment routing", () => {
     expect(flat).toContain("merge --ff-only origin/main");
   });
 
+  it("treats an allowlisted claim under the managed root as managed (hard-reset)", async () => {
+    const target = path.join(managedRoot, "misbound-app");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+    const logs: string[] = [];
+    const { runGit, calls } = fakeGit(headStub);
+
+    const result = await prepareWorkspace({
+      localPath: target,
+      containment: "allowlisted",
+      mode: "clone",
+      repository,
+      credentials,
+      runGit,
+      onLog: (line) => logs.push(line),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("reset --hard"))).toBe(true);
+    expect(logs.some((l) => /treating as managed/i.test(l))).toBe(true);
+  });
+
   it("leaves a user checkout with no origin remote alone instead of failing it", async () => {
     // Regression guard: before this refactor a hand-configured directory got no
     // preparation at all, so a local-only repo worked. It must keep working.
-    const target = path.join(tmpRoot, "user-no-origin");
+    const target = path.join(allowRoot, "user-no-origin");
     fs.mkdirSync(path.join(target, ".git"), { recursive: true });
     const { runGit, calls } = fakeGit((args) =>
       args[0] === "remote"
@@ -142,7 +169,7 @@ describe("prepareWorkspace containment routing", () => {
 
 describe("prepareWorkspace idempotency", () => {
   it("clones once, then only fetches on subsequent calls", async () => {
-    const target = path.join(tmpRoot, "twice");
+    const target = path.join(managedRoot, "twice");
     const { runGit, calls } = fakeGit(headStub);
 
     const first = await prepareWorkspace({
@@ -172,7 +199,7 @@ describe("prepareWorkspace idempotency", () => {
 
 describe("prepareWorkspace modes", () => {
   it("initializes an empty repo for a project with no repository", async () => {
-    const target = path.join(tmpRoot, "no-repo");
+    const target = path.join(managedRoot, "no-repo");
     const { runGit, calls } = fakeGit();
 
     const result = await prepareWorkspace({
@@ -190,7 +217,7 @@ describe("prepareWorkspace modes", () => {
 
   it("treats a clone request with no clone URL as an empty workspace", async () => {
     // A project may legitimately have no repository; the work just stays local.
-    const target = path.join(tmpRoot, "no-clone-url");
+    const target = path.join(managedRoot, "no-clone-url");
     const { runGit } = fakeGit();
 
     const result = await prepareWorkspace({
@@ -206,7 +233,7 @@ describe("prepareWorkspace modes", () => {
   });
 
   it("refuses archive mode with no download link rather than silently starting empty", async () => {
-    const target = path.join(tmpRoot, "archive-no-url");
+    const target = path.join(managedRoot, "archive-no-url");
     const { runGit, calls } = fakeGit();
 
     const result = await prepareWorkspace({
@@ -227,7 +254,7 @@ describe("prepareWorkspace modes", () => {
 
 describe("prepareWorkspace failure reporting", () => {
   it("returns a reason instead of throwing, so only the current job fails", async () => {
-    const target = path.join(tmpRoot, "broken");
+    const target = path.join(managedRoot, "broken");
     const { runGit } = fakeGit((args) => (args[0] === "clone" ? { code: 128 } : { code: 0 }));
 
     const result = await prepareWorkspace({

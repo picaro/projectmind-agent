@@ -30,7 +30,7 @@ import {
   type WorkspaceContainment,
   type WorkspaceMode,
 } from "./workspace-manager.js";
-import { restoreWorkspaceDefaultBranch } from "./managed-workspace.js";
+import { restoreWorkspaceDefaultBranch, assertPathInsideManagedRoot, resolveManagedRoot } from "./managed-workspace.js";
 import { ensureTaskWorktree } from "./task-worktree.js";
 import { prepareEnvironment } from "./environment-manager.js";
 import { errorCodeForPhase, reportPhase, type ExecutionLifecyclePhase } from "./execution-phase.js";
@@ -549,11 +549,16 @@ export async function executeClaimedJob(
       // directory a person configured — so it gets the non-destructive treatment.
       // With a binding but no `containment` (an older control plane), the path is
       // agent-owned by definition: that is all such a server ever sent.
-      const containment: WorkspaceContainment = !managedWorkspace?.localPath
+      // Paths under this agent's managed root are always managed, even if the
+      // claim said allowlisted (mis-bound ~/.imemory/workspaces/<slug>).
+      let containment: WorkspaceContainment = !managedWorkspace?.localPath
         ? "allowlisted"
         : managedWorkspace.containment === "allowlisted"
           ? "allowlisted"
           : "managed";
+      if (assertPathInsideManagedRoot(workspaceTarget, resolveManagedRoot()).ok) {
+        containment = "managed";
+      }
       const mode: WorkspaceMode =
         managedWorkspace?.mode === "archive"
           ? "archive"

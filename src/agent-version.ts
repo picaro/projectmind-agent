@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 /** Fallback when package.json / embed is unavailable. Keep in sync with package.json. */
-export const AGENT_VERSION_FALLBACK = "0.2.4";
+export const AGENT_VERSION_FALLBACK = "0.2.5";
 
 /** Release build timestamp injected by esbuild; unavailable in source checkouts. */
 export function getAgentBuildDate(env: NodeJS.ProcessEnv = process.env): string | null {

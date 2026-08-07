@@ -424,15 +424,17 @@ export async function ensureManagedArchiveWorkspace(
  *    did not create
  */
 /**
- * Bring a *user-configured* checkout up to date without ever destroying work.
+ * Bring a *user-configured* checkout up to date without discarding uncommitted work.
  *
  * This is the counterpart to ensureManagedClone for directories the agent does
- * not own. The difference is the whole point: a person may have uncommitted
- * edits in here, so there is no `reset --hard` and no `clean`. The tree is
- * fetched, switched onto the default branch (auto-stashing when a previous agent
- * left a dirty feature branch), and updated with a strict fast-forward. Local
- * edits are never discarded — only stashed. Diverged history still fails the
- * job with a message saying what to fix — the user can then resolve it and retry.
+ * not own. The tree is fetched, switched onto the default branch (auto-stashing
+ * when a previous agent left a dirty feature branch), and updated with a strict
+ * fast-forward. Uncommitted edits are never discarded — only stashed.
+ *
+ * Clean but diverged history (common after an agent committed on main and a
+ * push was rejected) is auto-reconciled with `reset --hard origin/<branch>` so
+ * the next job is not blocked. A dirty diverged tree still fails with a
+ * message saying what to fix.
  *
  * Cloning into a missing/empty directory is still allowed: there is nothing to
  * lose, and naming a not-yet-existing folder is a supported way to configure one.
@@ -539,18 +541,36 @@ export async function ensureUserWorkspace(
     }
   }
 
-  // Fast-forward only: this can never rewrite or drop a local commit. A diverged
-  // branch stops the job rather than being silently reconciled.
+  // Prefer fast-forward so we never rewrite local commits when avoidable.
   const merged = await runGit(
     localPath,
     ["merge", "--ff-only", `origin/${targetBranch}`],
     input.credentials,
   );
   if (merged.code !== 0) {
-    return {
-      ok: false,
-      reason: `workspace ${localPath} has diverged from origin/${targetBranch} and cannot be fast-forwarded. Reconcile it (rebase, merge, or push) and retry.`,
-    };
+    const statusAfter = await runGit(localPath, ["status", "--porcelain"], input.credentials);
+    if (statusAfter.stdout.trim()) {
+      return {
+        ok: false,
+        reason: `workspace ${localPath} has diverged from origin/${targetBranch} and cannot be fast-forwarded. Reconcile it (rebase, merge, or push) and retry.`,
+      };
+    }
+    // Clean tree + diverged history: discard local-only commits and match origin.
+    // Typical cause: prior agent committed on the default branch then push failed.
+    log(
+      `Clean workspace diverged from origin/${targetBranch}; hard-resetting to discard local-only commits`,
+    );
+    const reset = await runGit(
+      localPath,
+      ["reset", "--hard", `origin/${targetBranch}`],
+      input.credentials,
+    );
+    if (reset.code !== 0) {
+      return {
+        ok: false,
+        reason: `workspace ${localPath} has diverged from origin/${targetBranch} and reset failed: ${redactSecrets(reset.stderr, secrets)}. Reconcile it (rebase, merge, or push) and retry.`,
+      };
+    }
   }
 
   const head = await runGit(localPath, ["rev-parse", "HEAD"], input.credentials);
@@ -709,10 +729,12 @@ export type RestoreWorkspaceDefaultBranchResult =
 
 /**
  * Post-job hygiene: leave the base checkout on the remote default branch so the
- * next prepare is not blocked by a leftover feature branch.
+ * next prepare is not blocked by a leftover feature branch or diverged main.
  *
- * - managed: force-match origin/<default> (same contract as prepare)
- * - allowlisted: stash if dirty, then checkout (never reset --hard)
+ * - managed: force-match origin/<default> (same contract as prepare), including
+ *   when already on the default branch but HEAD ≠ origin
+ * - allowlisted: stash if dirty then checkout; if already on default and clean
+ *   but diverged from origin, hard-reset (same clean-diverge policy as prepare)
  *
  * Best-effort: callers should log failures and not fail the job over this.
  */
@@ -740,12 +762,15 @@ export async function restoreWorkspaceDefaultBranch(
   }
 
   let targetBranch = branch;
+  let targetSha: string | null = null;
   const remoteRef = await runGit(
     localPath,
     ["rev-parse", "--verify", `origin/${branch}`],
     input.credentials,
   );
-  if (remoteRef.code !== 0) {
+  if (remoteRef.code === 0) {
+    targetSha = remoteRef.stdout.trim() || null;
+  } else {
     const symbolic = await runGit(
       localPath,
       ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -759,15 +784,24 @@ export async function restoreWorkspaceDefaultBranch(
       };
     }
     targetBranch = detected;
+    const targetRef = await runGit(
+      localPath,
+      ["rev-parse", "--verify", `origin/${targetBranch}`],
+      input.credentials,
+    );
+    targetSha = targetRef.code === 0 ? targetRef.stdout.trim() || null : null;
   }
 
   const current = await runGit(localPath, ["rev-parse", "--abbrev-ref", "HEAD"], input.credentials);
   const currentBranch = current.code === 0 ? current.stdout.trim() : "";
   const status = await runGit(localPath, ["status", "--porcelain"], input.credentials);
   const dirty = Boolean(status.stdout.trim());
+  const head = await runGit(localPath, ["rev-parse", "HEAD"], input.credentials);
+  const headSha = head.code === 0 ? head.stdout.trim() : "";
+  const matchesRemote = Boolean(targetSha && headSha && headSha === targetSha);
 
   if (input.containment === "managed") {
-    if (currentBranch === targetBranch && !dirty) {
+    if (currentBranch === targetBranch && !dirty && matchesRemote) {
       return {
         ok: true,
         restored: false,
@@ -808,6 +842,25 @@ export async function restoreWorkspaceDefaultBranch(
 
   // allowlisted
   if (currentBranch === targetBranch) {
+    if (!dirty && !matchesRemote && targetSha) {
+      log(
+        `Cleanup: clean allowlisted workspace diverged from origin/${targetBranch}; hard-resetting`,
+      );
+      const reset = await runGit(
+        localPath,
+        ["reset", "--hard", `origin/${targetBranch}`],
+        input.credentials,
+      );
+      if (reset.code !== 0) {
+        return { ok: false, reason: `git reset failed: ${redactSecrets(reset.stderr, secrets)}` };
+      }
+      return {
+        ok: true,
+        restored: true,
+        branch: targetBranch,
+        detail: `hard-reset clean diverged ${targetBranch} to origin/${targetBranch}`,
+      };
+    }
     return {
       ok: true,
       restored: false,
@@ -840,6 +893,32 @@ export async function restoreWorkspaceDefaultBranch(
       ok: false,
       reason: `git checkout ${targetBranch} failed: ${redactSecrets(checkout.stderr, secrets)}`,
     };
+  }
+
+  // After switching back, clean up diverged default-branch history the same way prepare does.
+  const statusOnDefault = await runGit(localPath, ["status", "--porcelain"], input.credentials);
+  if (!statusOnDefault.stdout.trim() && targetSha) {
+    const headOnDefault = await runGit(localPath, ["rev-parse", "HEAD"], input.credentials);
+    const shaOnDefault = headOnDefault.code === 0 ? headOnDefault.stdout.trim() : "";
+    if (shaOnDefault && shaOnDefault !== targetSha) {
+      log(
+        `Cleanup: clean allowlisted ${targetBranch} diverged from origin; hard-resetting after checkout`,
+      );
+      const reset = await runGit(
+        localPath,
+        ["reset", "--hard", `origin/${targetBranch}`],
+        input.credentials,
+      );
+      if (reset.code !== 0) {
+        return { ok: false, reason: `git reset failed: ${redactSecrets(reset.stderr, secrets)}` };
+      }
+      return {
+        ok: true,
+        restored: true,
+        branch: targetBranch,
+        detail: `checked out and hard-reset ${targetBranch} to origin/${targetBranch}`,
+      };
+    }
   }
 
   return {
