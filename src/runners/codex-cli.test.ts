@@ -116,7 +116,7 @@ echo '{"type":"item.completed","item":{"type":"agent_message","text":"All done"}
     expect(result.model).toBe("default");
   });
 
-  describe("API-key auth", () => {
+  describe("authentication", () => {
     function makeEnvEchoCodex(): string {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-fake-codex-env-"));
       const command = path.join(dir, "codex");
@@ -157,10 +157,10 @@ printf '{"type":"item.completed","item":{"type":"agent_message","text":"OPENAI=%
       }
     }
 
-    it("passes a configured key through under both env names", async () => {
+    it("strips a configured key by default so Codex uses subscription auth", async () => {
       const result = await runWith("sk-configured", undefined);
       expect(result.status).toBe("succeeded");
-      expect(result.summary).toBe("OPENAI=sk-configured CODEX=sk-configured");
+      expect(result.summary).toBe("OPENAI=unset CODEX=unset");
     });
 
     it("strips an inherited key when none is configured, so Codex uses subscription auth", async () => {
@@ -169,10 +169,23 @@ printf '{"type":"item.completed","item":{"type":"agent_message","text":"OPENAI=%
       expect(result.summary).toBe("OPENAI=unset CODEX=unset");
     });
 
-    it("lets the configured key win over an inherited one", async () => {
+    it("strips both configured and inherited keys", async () => {
       const result = await runWith("sk-configured", "sk-leaked-from-shell");
       expect(result.status).toBe("succeeded");
-      expect(result.summary).toBe("OPENAI=sk-configured CODEX=sk-configured");
+      expect(result.summary).toBe("OPENAI=unset CODEX=unset");
+    });
+
+    it("allows API-key auth only with an explicit opt-in", async () => {
+      const previous = process.env.IMEMORY_CODEX_AUTH_MODE;
+      process.env.IMEMORY_CODEX_AUTH_MODE = "api_key";
+      try {
+        const result = await runWith("sk-configured", "sk-leaked-from-shell");
+        expect(result.status).toBe("succeeded");
+        expect(result.summary).toBe("OPENAI=sk-configured CODEX=sk-configured");
+      } finally {
+        if (previous === undefined) delete process.env.IMEMORY_CODEX_AUTH_MODE;
+        else process.env.IMEMORY_CODEX_AUTH_MODE = previous;
+      }
     });
   });
 });

@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { createRunnerByName, resolveAutoRunnerChain } from "./runners/resolve.js";
+import { authModeForRunner, type AuthMode } from "./provider-pacing.js";
 import type { Runner, RunnerName } from "./runners/types.js";
 
 /** Prompt sent to each runner; deliberately trivial so a fast, cheap reply proves the model responds. */
@@ -14,6 +15,8 @@ export type ModelHealthResult = {
   error?: string;
   durationMs: number;
   model?: string;
+  /** Billing-relevant auth mode observed for the runner. */
+  authMode?: AuthMode;
 };
 
 function openRouterApiKey(): string {
@@ -68,13 +71,15 @@ export async function checkRunnerHealth(
       signal: controller.signal,
     });
     const durationMs = Date.now() - startedAt;
+    const authMode = authModeForRunner(name);
     if (result.status === "succeeded") {
-      return { runner: name, ok: true, durationMs, model: result.model };
+      return { runner: name, ok: true, durationMs, model: result.model, authMode };
     }
     return {
       runner: name,
       ok: false,
       durationMs,
+      authMode,
       error: result.error || `Runner ${name} did not succeed (${result.status})`,
     };
   } catch (err) {
@@ -82,6 +87,7 @@ export async function checkRunnerHealth(
       runner: name,
       ok: false,
       durationMs: Date.now() - startedAt,
+      authMode: authModeForRunner(name),
       error: err instanceof Error ? err.message : String(err),
     };
   } finally {

@@ -46,6 +46,10 @@ export function cursorApiKey(): string {
 }
 
 export function codexApiKey(): string {
+  // Codex is subscription-authenticated by default. API-key billing must be an
+  // explicit opt-in so an unrelated OPENAI_API_KEY in the agent environment
+  // cannot silently turn Codex jobs into metered API calls.
+  if (process.env.IMEMORY_CODEX_AUTH_MODE?.trim().toLowerCase() !== "api_key") return "";
   return process.env.CODEX_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || "";
 }
 

@@ -192,6 +192,7 @@ export function authModeForRunner(
     return env.CURSOR_API_KEY?.trim() ? "api_key" : "cli_login";
   }
   if (runner === "codex_cli") {
+    if (env.IMEMORY_CODEX_AUTH_MODE?.trim().toLowerCase() !== "api_key") return "cli_login";
     const key = env.CODEX_API_KEY?.trim() || env.OPENAI_API_KEY?.trim();
     return key ? "api_key" : "cli_login";
   }

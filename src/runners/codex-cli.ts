@@ -179,7 +179,10 @@ export function createCodexCliRunner(options: {
       // key exported in the agent's own shell silently pick metered billing. Pin
       // both directions explicitly (spawn drops undefined entries).
       const env: NodeJS.ProcessEnv = {};
-      const apiKey = options.apiKey?.trim();
+      const apiKey =
+        process.env.IMEMORY_CODEX_AUTH_MODE?.trim().toLowerCase() === "api_key"
+          ? options.apiKey?.trim()
+          : undefined;
       if (apiKey) {
         env.CODEX_API_KEY = apiKey;
         // Some installs still read OPENAI_API_KEY
