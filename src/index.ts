@@ -10,6 +10,7 @@ import {
 } from "./machine.js";
 import { connectMcpClient, callToolJson } from "./mcp-client.js";
 import { claimNextJob, executeClaimedJob, hasAnyAvailableRunner } from "./jobs.js";
+import { syncGlobalCooldowns } from "./provider-pacing.js";
 import { getClaudeUsageSnapshot } from "./claude-usage.js";
 import { readLlmUsageMeta } from "./llm-stats.js";
 import { parseAllowlist } from "./safety.js";
@@ -101,10 +102,10 @@ async function reportHeartbeat(
   meta.managedWorkspaceRoot = resolveManagedRoot();
   meta.capabilities = { managedClone: true };
 
-  const response = await callToolJson<{ agent?: { meta?: Record<string, unknown> | null } }>(
-    client,
-    "reportAgentHeartbeat",
-    {
+  const response = await callToolJson<{
+    agent?: { meta?: Record<string, unknown> | null };
+    cooldowns?: Array<{ runner: string; cooldown_until: string | null }>;
+  }>(client, "reportAgentHeartbeat", {
       name: info.host,
       agentKey: info.agentKey,
       kind: info.kind,
@@ -112,6 +113,11 @@ async function reportHeartbeat(
       meta,
     },
   );
+
+  // Sync server cooldowns/disabled markers without claiming a job.
+  if (response.cooldowns) {
+    syncGlobalCooldowns(response.cooldowns);
+  }
 
   const loadPart = cpuLoadPercent != null ? ` CPU=${cpuLoadPercent}%` : "";
   if (llmUsage && Object.keys(llmUsage.byLlm).length > 0) {
@@ -411,16 +417,13 @@ async function main(): Promise<void> {
         }
 
         // Pre-claim gate: skip claiming if all runners are in cooldown/disabled.
-        // This avoids claiming a job only to immediately release it.
+        // Claiming is not a safe side channel for cooldown sync — that happens on heartbeat.
         const runnersReady = await hasAnyAvailableRunner();
         if (!runnersReady) {
           // Log once every 12 polls to avoid spam.
           if (pollCount === 1 || pollCount % 12 === 0) {
             console.log("All runners in cooldown/disabled — skipping claim attempt");
           }
-          // Still call claimNextJob with no-op to sync cooldowns from server
-          // (the server now returns cooldowns even when job is null).
-          await claimNextJob(client, info.agentKey).catch(() => {});
         } else {
           const claimed = await claimNextJob(client, info.agentKey);
           if (claimed) {

@@ -229,6 +229,7 @@ export async function claimNextJob(
  * Check whether at least one runner from the auto cascade is currently available
  * (not in cooldown and not disabled) based on the locally-synced pacing state.
  * Call this BEFORE claimNextJob to avoid wasting a claim on a job we can't run.
+ * Do not call claimNextJob just to refresh cooldowns — sync those from heartbeat.
  */
 export async function hasAnyAvailableRunner(): Promise<boolean> {
   const rawAttempts = await resolveRunnerAttempts("auto");
