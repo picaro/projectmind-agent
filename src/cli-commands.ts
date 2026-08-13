@@ -384,7 +384,23 @@ export async function runSetupCommand(envPath: string): Promise<number> {
   return result.success ? 0 : 1;
 }
 
-export type CliCommand = "setup" | "doctor" | "test" | "runners" | "help" | "version";
+export async function runLoginCommand(envPath: string, args: string[] = []): Promise<number> {
+  let mcpUrl = process.env.IMEMORY_MCP_URL?.trim() || "";
+  let appOrigin = process.env.IMEMORY_APP_ORIGIN?.trim() || "";
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--mcp-url") mcpUrl = args[++i]?.trim() || mcpUrl;
+    else if (args[i] === "--app-origin") appOrigin = args[++i]?.trim() || appOrigin;
+  }
+  const { runDeviceLogin } = await import("./device-login.js");
+  const result = await runDeviceLogin({
+    envPath,
+    mcpUrl: mcpUrl || undefined,
+    appOrigin: appOrigin || undefined,
+  });
+  return result.success ? 0 : 1;
+}
+
+export type CliCommand = "setup" | "login" | "doctor" | "test" | "runners" | "help" | "version";
 
 export function parseCliCommand(args: string[]): { command: CliCommand | null; args: string[] } {
   if (args.length === 0) {
@@ -393,7 +409,7 @@ export function parseCliCommand(args: string[]): { command: CliCommand | null; a
   
   const first = args[0].toLowerCase();
   
-  if (["setup", "doctor", "test", "runners", "help", "version"].includes(first)) {
+  if (["setup", "login", "doctor", "test", "runners", "help", "version"].includes(first)) {
     return { command: first as CliCommand, args: args.slice(1) };
   }
   
@@ -407,6 +423,7 @@ ProjectMind Agent v${version}
 Usage: projectmind-agent [command]
 
 Commands:
+  login       Browser pairing — mint API key without pasting
   setup       Run interactive setup wizard
   doctor      Run diagnostics and check configuration
   test        Test all configured runners
@@ -418,7 +435,8 @@ Commands:
 
 Examples:
   projectmind-agent              # Start the agent
-  projectmind-agent setup        # Configure the agent
+  projectmind-agent login        # Connect with browser (recommended)
+  projectmind-agent setup        # Configure allowlist / runners
   projectmind-agent doctor       # Check for issues
   projectmind-agent test         # Test all runners
 

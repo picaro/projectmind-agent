@@ -28,7 +28,7 @@ export function createAntigravityCliRunner(options: {
 
   return {
     name: "antigravity_cli",
-    async run({ cwd, prompt, onLog, signal }): Promise<RunnerResult> {
+    async run({ cwd, prompt, onLog, signal, timeoutMs }): Promise<RunnerResult> {
       const args: string[] = [];
 
       if (model) {
@@ -39,6 +39,14 @@ export function createAntigravityCliRunner(options: {
       }
       // Prefer accepting edits over plan-only for implementation jobs.
       args.push("--mode", "accept-edits");
+      // Antigravity defaults print mode to five minutes, which is shorter than
+      // normal ProjectMind jobs and causes long-running test/build work to be
+      // killed while the agent lease is still healthy. Leave headroom below
+      // the job wall clock so the queue watchdog remains authoritative.
+      const printTimeoutMs = timeoutMs && timeoutMs > 0 ? Math.max(60_000, timeoutMs - 30_000) : undefined;
+      if (printTimeoutMs) {
+        args.push("--print-timeout", `${Math.ceil(printTimeoutMs / 1000)}s`);
+      }
       if (options.extraArgs?.length) {
         args.push(...options.extraArgs);
       }

@@ -248,12 +248,24 @@ export async function runSetupWizard(envPath: string): Promise<SetupWizardResult
   
   // Step 1: API Key
   console.log("Step 1/4: ProjectMind API Key");
-  console.log("Get your API key from: https://projectm.dev → Project → Settings → API keys\n");
-  
-  const apiKey = await prompt("Enter your ProjectMind API key");
-  if (!apiKey || !apiKey.startsWith("imk_")) {
-    console.log("\n❌ Invalid API key. API keys should start with 'imk_'");
-    return { success: false, envPath };
+  console.log("Prefer browser login (no paste): run 'projectmind-agent login' in another terminal,");
+  console.log("or paste a key from ProjectMind → Project → Settings → API keys.\n");
+
+  const useBrowser = await promptYesNo("Use browser login now?", true);
+  let apiKey = "";
+  if (useBrowser) {
+    const { runDeviceLogin } = await import("./device-login.js");
+    const login = await runDeviceLogin({ envPath });
+    if (!login.success || !login.apiKey) {
+      return { success: false, envPath };
+    }
+    apiKey = login.apiKey;
+  } else {
+    apiKey = await prompt("Enter your ProjectMind API key");
+    if (!apiKey || !apiKey.startsWith("imk_")) {
+      console.log("\n❌ Invalid API key. API keys should start with 'imk_'");
+      return { success: false, envPath };
+    }
   }
   
   // Step 2: MCP URL

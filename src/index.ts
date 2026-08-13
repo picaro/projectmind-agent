@@ -32,6 +32,7 @@ import { shouldRunSetupWizard, runSetupWizard } from "./setup-wizard.js";
 import {
   parseCliCommand,
   runSetupCommand,
+  runLoginCommand,
   runDoctorCommand,
   runTestCommand,
   runRunnersCommand,
@@ -213,6 +214,11 @@ async function main(): Promise<void> {
   
   if (command === "setup") {
     const exitCode = await runSetupCommand(envPath);
+    process.exit(exitCode);
+  }
+
+  if (command === "login") {
+    const exitCode = await runLoginCommand(envPath, args);
     process.exit(exitCode);
   }
   

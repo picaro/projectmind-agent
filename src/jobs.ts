@@ -918,6 +918,7 @@ export async function executeClaimedJob(
           cwd: safety.cwd,
           prompt,
           signal: abort.signal,
+          timeoutMs: job.timeoutMs,
           onLog: async (message, kind = "log") => {
             logLocal(job.id, `[${kind}] ${message}`);
             try {

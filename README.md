@@ -11,16 +11,18 @@
 
 ```bash
 npm install -g projectmind-agent
+projectmind-agent login
 projectmind-agent setup
 ```
 
 ### Or run with npx
 
 ```bash
+npx projectmind-agent login
 npx projectmind-agent setup
 ```
 
-The setup wizard will guide you through configuration in under 2 minutes.
+`login` opens browser pairing (no API key paste). `setup` configures workspace allowlist and runners.
 
 ## What It Does
 
@@ -41,6 +43,7 @@ Once installed, you can use these commands:
 
 ```bash
 projectmind-agent          # Start the agent (begins polling for jobs)
+projectmind-agent login    # Browser pairing — mint API key (recommended)
 projectmind-agent setup    # Run interactive configuration wizard
 projectmind-agent doctor   # Check configuration and diagnose issues
 projectmind-agent test     # Test all configured AI assistants

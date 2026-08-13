@@ -8,6 +8,8 @@ export type RunnerInput = {
   prompt: string;
   onLog: RunnerLog;
   signal: AbortSignal;
+  /** Job wall-clock budget in milliseconds, when supplied by the queue. */
+  timeoutMs?: number;
 };
 
 /** Token usage / cost / timing reported by the underlying CLI, when it exposes one. */
