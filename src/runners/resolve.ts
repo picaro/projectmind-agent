@@ -539,7 +539,8 @@ export function handleRunnerResult(
 /**
  * Resolve which runners to attempt for a job.
  * - `auto` / `cursor_sdk` / unknown: key → cursor_sdk, then CLIs
- * - explicit CLI / API runner: that runner only
+ * - explicit CLI / API runner: that runner first, then the rest of the cascade
+ * - hard rules (and the runtime exhaustion override): that runner only
  *
  * Note: `cursor_sdk` uses the same cascade as `auto` so jobs queued with the
  * old default still fall through to CLI when CURSOR_API_KEY is missing.
@@ -579,9 +580,15 @@ export async function resolveRunnerAttempts(
 
   if (explicitRunners.includes(runner)) {
     const specificRunner = runner as Exclude<RunnerName, "auto">;
-    if (hardRule || !requested || requested === "auto" || runnerOverride) {
+    // Only a hard rule (job-level pin) or the exhaustion override — which is
+    // re-checked against disabled/cooldown above — resolves to a lone runner.
+    if (hardRule || runnerOverride) {
       return [specificRunner];
     }
+    // Everything else keeps the cascade behind the head runner. In particular
+    // `auto`/empty resolved through IMEMORY_DEFAULT_RUNNER is a cascade intent,
+    // not a pin: a disabled or rate-limited default must fall through to the
+    // remaining runners instead of leaving the agent with nothing to run.
     const chain = await resolveAutoRunnerChain(deps);
     const fallbackChain = chain.filter((r) => r !== specificRunner);
     return [specificRunner, ...fallbackChain];

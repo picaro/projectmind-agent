@@ -292,22 +292,63 @@ describe("isRetryableRunnerFailure", () => {
 describe("default runner from environment", () => {
   const originalEnv = { ...process.env };
 
-  afterEach(() => {
+  const deps = {
+    cursorKey: "",
+    cursorBin: "agent",
+    codexBin: "codex",
+    antigravityBin: "agy",
+    claudeBin: "claude",
+    copilotBin: "copilot",
+    commandExists: async (cmd: string) =>
+      ["agent", "codex", "agy", "claude", "copilot"].includes(cmd),
+  };
+
+  afterEach(async () => {
     process.env = { ...originalEnv };
     resetRunnerOverride();
+    const { resetProviderPacing } = await import("./provider-pacing.js");
+    resetProviderPacing();
   });
 
-  it("respects IMEMORY_DEFAULT_RUNNER", async () => {
+  it("respects IMEMORY_DEFAULT_RUNNER, keeping the cascade behind it", async () => {
     process.env.IMEMORY_DEFAULT_RUNNER = "antigravity_cli";
-    const attempts = await resolveRunnerAttempts("auto");
-    expect(attempts).toEqual(["antigravity_cli"]);
+    const attempts = await resolveRunnerAttempts("auto", deps);
+    expect(attempts).toEqual([
+      "antigravity_cli",
+      "cursor_cli",
+      "codex_cli",
+      "claude_cli",
+      "copilot_cli",
+    ]);
   });
 
-  it("respects IMEMORY_DEFAULT_AI", async () => {
+  it("respects IMEMORY_DEFAULT_AI, keeping the cascade behind it", async () => {
     delete process.env.IMEMORY_DEFAULT_RUNNER;
     process.env.IMEMORY_DEFAULT_AI = "codex_cli";
-    const attempts = await resolveRunnerAttempts("auto");
-    expect(attempts).toEqual(["codex_cli"]);
+    const attempts = await resolveRunnerAttempts("auto", deps);
+    expect(attempts).toEqual([
+      "codex_cli",
+      "cursor_cli",
+      "antigravity_cli",
+      "claude_cli",
+      "copilot_cli",
+    ]);
+  });
+
+  it("still has runners available when the default runner is disabled server-side", async () => {
+    const { planAttempts, syncGlobalCooldowns } = await import("./provider-pacing.js");
+    syncGlobalCooldowns([
+      { runner: "cursor_cli", cooldown_until: "2999-01-01T00:00:00.000Z" },
+      { runner: "cursor_cli::disabled", cooldown_until: "9999-12-31T23:59:59.999Z" },
+      { runner: "codex_cli::disabled", cooldown_until: "9999-12-31T23:59:59.999Z" },
+      { runner: "copilot_cli::disabled", cooldown_until: "9999-12-31T23:59:59.999Z" },
+    ]);
+    process.env.IMEMORY_DEFAULT_RUNNER = "cursor_cli";
+
+    const attempts = await resolveRunnerAttempts("auto", deps);
+    const { available } = planAttempts(attempts, { rotate: false });
+
+    expect(available).toEqual(["antigravity_cli", "claude_cli"]);
   });
 });
 
