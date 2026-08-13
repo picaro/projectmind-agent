@@ -20,6 +20,7 @@ import {
 } from "./runners/resolve.js";
 import { parseAllowlist, effectiveAllowlist } from "./safety.js";
 import { normalizeMcpBaseUrl } from "./machine.js";
+import { envFileHasImemoryApiKey } from "./api-key.js";
 import { existsSync } from "node:fs";
 
 type DiagnosticIssue = {
@@ -44,13 +45,12 @@ async function checkEnvFile(envPath: string): Promise<DiagnosticIssue[]> {
   
   const content = await readFile(envPath, "utf8");
   
-  // Check for API key
-  const hasApiKey = /IMEMORY_API_KEY\s*=\s*imk_/.test(content);
-  if (!hasApiKey) {
+  // Check for API key (imk_ / imgk_ from browser login / imbk_)
+  if (!envFileHasImemoryApiKey(content)) {
     issues.push({
       category: "error",
       message: "IMEMORY_API_KEY is missing or invalid",
-      fix: "Get your API key from https://projectm.dev → Project → Settings → API keys",
+      fix: "Run 'projectmind-agent login' or paste a key (imk_/imgk_/imbk_) from ProjectMind settings",
     });
   }
   
@@ -64,13 +64,13 @@ async function checkEnvFile(envPath: string): Promise<DiagnosticIssue[]> {
     });
   }
   
-  // Check for workspace allowlist
+  // Allowlist is optional when managed workspaces are available.
   const allowlistMatch = content.match(/IMEMORY_WORKSPACE_ALLOWLIST\s*=\s*(.+)/);
   if (!allowlistMatch || !allowlistMatch[1].trim()) {
     issues.push({
-      category: "error",
+      category: "warning",
       message: "IMEMORY_WORKSPACE_ALLOWLIST is not configured",
-      fix: "Set IMEMORY_WORKSPACE_ALLOWLIST to comma-separated workspace paths in .env",
+      fix: "Optional if using managed workspaces (~/.imemory/workspaces). Otherwise set comma-separated workspace paths in .env",
     });
   } else {
     const paths = parseAllowlist(allowlistMatch[1]);
@@ -232,11 +232,11 @@ export async function runDoctorCommand(envPath: string): Promise<number> {
   console.log("→ Checking workspace allowlist...");
   const allowlist = effectiveAllowlist();
   if (allowlist.length === 0) {
-    console.log("  ✗ No workspace paths configured");
+    console.log("  ⚠ No workspace paths configured (managed workspaces may still work once cloned)");
     allIssues.push({
-      category: "error",
+      category: "warning",
       message: "No workspace paths configured",
-      fix: "Set IMEMORY_WORKSPACE_ALLOWLIST in .env",
+      fix: "Optional with managed workspaces. Or set IMEMORY_WORKSPACE_ALLOWLIST in .env",
     });
   } else {
     console.log(`  ✓ ${allowlist.length} workspace path(s) configured:`);

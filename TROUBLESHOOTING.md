@@ -60,22 +60,23 @@ The wizard will create the `.env` file for you.
 
 ### Invalid API key
 
-**Problem**: "Invalid API key" or "API keys should start with 'imk_'"
+**Problem**: "Invalid API key", "API keys should start with 'imk_'", or "Configuration missing or incomplete" after browser login
 
 **Solution**:
-1. Get a new API key from https://projectm.dev → Project → Settings → API keys
-2. Make sure you copied the full key (starts with `imk_`)
+1. Prefer `projectmind-agent login` (browser pairing). It mints a user-global `imgk_` key by default; project keys use `imk_`, bucket keys use `imbk_`.
+2. Make sure you copied the full key (any of those prefixes).
 3. Update `.env`:
    ```ini
-   IMEMORY_API_KEY=imk_your_full_api_key_here
+   IMEMORY_API_KEY=imgk_your_full_api_key_here
    ```
+4. Upgrade the agent if an older build only accepted `imk_` and keeps prompting setup after a successful login.
 
 ### Workspace allowlist not configured
 
 **Problem**: "IMEMORY_WORKSPACE_ALLOWLIST is not configured"
 
 **Solution**:
-Edit `.env` and add absolute paths to directories where the agent can work:
+Optional when using managed workspaces (`~/.imemory/workspaces`). Otherwise edit `.env` and add absolute paths to directories where the agent can work:
 
 ```ini
 # Single path

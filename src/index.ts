@@ -311,7 +311,7 @@ async function main(): Promise<void> {
   
   if (allowlist.length === 0) {
     console.warn("\n⚠️  Warning: IMEMORY_WORKSPACE_ALLOWLIST is empty");
-    console.warn("   Heartbeats work, but jobs will fail until configured.\n");
+    console.warn("   Managed workspaces (~/.imemory/workspaces) still work; set an allowlist for extra roots.\n");
   } else {
     console.log(`  Workspaces: ${allowlist.length} path(s)`);
   }

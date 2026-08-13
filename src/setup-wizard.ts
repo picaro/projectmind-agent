@@ -18,6 +18,7 @@ import {
 } from "./runners/resolve.js";
 import { parseAllowlist } from "./safety.js";
 import { normalizeMcpBaseUrl } from "./machine.js";
+import { envFileHasImemoryApiKey, isImemoryApiKey } from "./api-key.js";
 
 const PRODUCTION_MCP_URL = "https://projectm.dev/api/mcp";
 const LOCAL_MCP_URL = "http://localhost:8080/api/mcp";
@@ -262,8 +263,8 @@ export async function runSetupWizard(envPath: string): Promise<SetupWizardResult
     apiKey = login.apiKey;
   } else {
     apiKey = await prompt("Enter your ProjectMind API key");
-    if (!apiKey || !apiKey.startsWith("imk_")) {
-      console.log("\n❌ Invalid API key. API keys should start with 'imk_'");
+    if (!isImemoryApiKey(apiKey)) {
+      console.log("\n❌ Invalid API key. Keys should start with imk_, imgk_, or imbk_");
       return { success: false, envPath };
     }
   }
@@ -422,15 +423,18 @@ export async function runSetupWizard(envPath: string): Promise<SetupWizardResult
 }
 
 export async function shouldRunSetupWizard(envPath: string): Promise<boolean> {
+  // Key may already be loaded from another .env location (next to binary, shell, etc.).
+  // Browser pairing defaults to imgk_; project keys use imk_; buckets use imbk_.
+  if (isImemoryApiKey(process.env.IMEMORY_API_KEY) || isImemoryApiKey(process.env.MCP_API_KEY)) {
+    return false;
+  }
+
   try {
     await access(envPath, fsConstants.R_OK);
     const content = await readFile(envPath, "utf8");
-    
-    // Check if essential config is missing
-    const hasApiKey = /IMEMORY_API_KEY\s*=\s*imk_/.test(content);
-    const hasAllowlist = /IMEMORY_WORKSPACE_ALLOWLIST\s*=\s*.+/.test(content);
-    
-    return !hasApiKey || !hasAllowlist;
+    // API key is enough to start. Allowlist is optional when managed workspaces
+    // (~/.imemory/workspaces) are in use; doctor can still warn about it.
+    return !envFileHasImemoryApiKey(content);
   } catch {
     // .env doesn't exist
     return true;
