@@ -23,7 +23,9 @@ async function main() {
   await mkdir(distDir, { recursive: true });
 
   const esbuild = require("esbuild");
-  const outFile = resolve(distDir, "cli.js");
+  // Must be .cjs: package.json has "type": "module", so a CJS bundle named .js
+  // is loaded as ESM and crashes with "require is not defined".
+  const outFile = resolve(distDir, "cli.cjs");
 
   await esbuild.build({
     entryPoints: [resolve(agentRoot, "src/index.ts")],
