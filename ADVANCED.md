@@ -1,4 +1,4 @@
-# ProjectMind desktop agent (v0.2.5) - Advanced Documentation
+# ProjectMind desktop agent (v0.2.7) - Advanced Documentation
 
 Long-running **macOS / Windows / Ubuntu** CLI that:
 
