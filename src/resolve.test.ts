@@ -286,6 +286,14 @@ describe("isRetryableRunnerFailure", () => {
         error: "HTTP 429 rate limit exceeded",
       }),
     ).toBe(true);
+    expect(
+      isRetryableRunnerFailure({
+        status: "failed",
+        summary: "",
+        error:
+          "Cursor CLI exited with code 1: cannot use model claude-3-5-sonnet (not in the current Cursor CLI catalog)",
+      }),
+    ).toBe(true);
   });
 });
 

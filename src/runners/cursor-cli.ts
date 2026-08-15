@@ -88,6 +88,110 @@ function extractFinalSummary(stdout: string, lastAssistant: string): string {
   return plain.slice(0, 8_000);
 }
 
+/**
+ * Control-plane recovery and Anthropic API ids that Cursor CLI no longer
+ * accepts. Mapped to the closest current Cursor CLI catalog id so a retry
+ * does not fail with a 400-line "Available models:" dump.
+ */
+const CURSOR_CLI_MODEL_ALIASES: Record<string, string> = {
+  "claude-3-5-sonnet": "claude-4.5-sonnet",
+  "claude-3.5-sonnet": "claude-4.5-sonnet",
+  "claude-3-5-sonnet-latest": "claude-4.5-sonnet",
+  "claude-3.5-sonnet-latest": "claude-4.5-sonnet",
+  "claude-3-5-haiku": "claude-4.5-sonnet",
+  "claude-3.5-haiku": "claude-4.5-sonnet",
+  "claude-sonnet-4": "claude-4-sonnet",
+  "claude-sonnet-4.5": "claude-4.5-sonnet",
+  "claude-4-opus": "claude-4.5-opus-high",
+  "claude-4.5-opus": "claude-4.5-opus-high",
+};
+
+const MODEL_FAMILY_TOKENS = new Set([
+  "opus",
+  "sonnet",
+  "haiku",
+  "gpt",
+  "gemini",
+  "grok",
+  "composer",
+  "codex",
+  "kimi",
+  "glm",
+]);
+
+function normalizeModelId(id: string): string {
+  return id.trim().toLowerCase().replace(/_/g, "-").replace(/\./g, "-");
+}
+
+/**
+ * Resolve the `--model` flag for Cursor CLI.
+ * `default` is a ProjectMind sentinel, not a Cursor catalog id — omit the flag.
+ */
+export function resolveCursorCliModelFlag(model?: string | null): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed) return undefined;
+  const key = trimmed.toLowerCase();
+  if (key === "default") return undefined;
+  return CURSOR_CLI_MODEL_ALIASES[key] ?? trimmed;
+}
+
+export function parseCursorCliModelRejection(
+  text: string,
+): { rejected: string; available: string[] } | null {
+  const match = text.match(/Cannot use this model:\s*([^\s.]+)\.\s*Available models:\s*(.*)/is);
+  if (!match) return null;
+  const rejected = match[1]!.trim();
+  const available = match[2]!
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!rejected || available.length === 0) return null;
+  return { rejected, available };
+}
+
+export function pickClosestCursorCliModel(
+  requested: string,
+  available: string[],
+): string | undefined {
+  const reqNorm = normalizeModelId(requested);
+  const reqTokens = reqNorm.split("-").filter((t) => t && t !== "latest");
+  const family = reqTokens.find((t) => MODEL_FAMILY_TOKENS.has(t));
+  const familyWanted = family === "haiku" ? "sonnet" : family;
+
+  let best: { id: string; score: number } | undefined;
+  for (const id of available) {
+    if (!id || id === "auto") continue;
+    const tokens = normalizeModelId(id).split("-").filter(Boolean);
+    const tokenSet = new Set(tokens);
+    let score = 0;
+    if (familyWanted && tokenSet.has(familyWanted)) score += 20;
+    for (const t of reqTokens) {
+      if (tokenSet.has(t)) score += 2;
+    }
+    if (/thinking/i.test(id)) score -= 4;
+    if (/-fast$/i.test(id)) score -= 2;
+    if (/-max$/i.test(id) || /xhigh/i.test(id)) score -= 1;
+    if (familyWanted && new RegExp(`${familyWanted}$`, "i").test(id)) score += 3;
+    if (!best || score > best.score) best = { id, score };
+  }
+  if (best && best.score >= 20) return best.id;
+  if (available.includes("auto")) return "auto";
+  return best?.id;
+}
+
+export function formatCursorCliExitError(code: number | null, output: string): string {
+  const text = output.trim();
+  const rejection = parseCursorCliModelRejection(text);
+  if (rejection) {
+    return (
+      `Cursor CLI exited with code ${code ?? "?"}: cannot use model ${rejection.rejected} ` +
+      "(not in the current Cursor CLI catalog)"
+    );
+  }
+  const head = text.slice(0, 800);
+  return `Cursor CLI exited with code ${code ?? "?"}` + (head ? `: ${head}` : "");
+}
+
 export function createCursorCliRunner(options: {
   /** Binary name or path. Default: agent (Cursor Agent CLI). */
   command?: string;
@@ -101,87 +205,120 @@ export function createCursorCliRunner(options: {
     process.env.IMEMORY_CURSOR_CLI_BIN?.trim() ||
     process.env.CURSOR_CLI_BIN?.trim() ||
     "agent";
-  const model = options.model?.trim() || process.env.IMEMORY_CURSOR_MODEL?.trim();
+  const configuredModel = options.model?.trim() || process.env.IMEMORY_CURSOR_MODEL?.trim();
 
   return {
     name: "cursor_cli",
     async run({ cwd, prompt, onLog, signal }): Promise<RunnerResult> {
-      const args = [
-        "-p",
-        "--force",
-        "--trust",
-        "--workspace",
-        cwd,
-        "--output-format",
-        "stream-json",
-      ];
-
-      if (model) {
-        args.push("--model", model);
+      let model = resolveCursorCliModelFlag(configuredModel);
+      if (model && model !== configuredModel) {
+        await onLog(
+          `Mapped Cursor CLI model ${configuredModel} → ${model}`,
+          "status",
+        );
       }
-      // Prefer CURSOR_API_KEY in env — never put the key on argv (spawn logs / ps).
-      if (options.extraArgs?.length) {
-        args.push(...options.extraArgs);
-      }
-      args.push(prompt);
-
-      await onLog(
-        `Starting Cursor CLI (${command}) in ${cwd}` + (model ? ` model=${model}` : ""),
-        "status",
-      );
 
       let lastAssistant = "";
-      const result = await runCliProcess({
-        command,
-        args,
-        cwd,
-        env: options.apiKey?.trim() ? { CURSOR_API_KEY: options.apiKey.trim() } : undefined,
-        signal,
-        onLog,
-        onStdoutLine: async (line) => {
-          const obj = tryParseJsonLine(line);
-          if (!obj) return false;
-          const summary = summarizeCursorCliEvent(obj);
-          if (summary) {
-            if (
-              obj.type === "assistant" ||
-              obj.type === "message" ||
-              obj.type === "text" ||
-              obj.type === "result"
-            ) {
-              lastAssistant = summary;
-            }
-            await onLog(summary.slice(0, 7_000), "log");
-          }
-          return true;
-        },
-      });
 
-      const resolvedModel = model || "default";
+      const spawnOnce = async () => {
+        const args = [
+          "-p",
+          "--force",
+          "--trust",
+          "--workspace",
+          cwd,
+          "--output-format",
+          "stream-json",
+        ];
+        if (model) {
+          args.push("--model", model);
+        }
+        // Prefer CURSOR_API_KEY in env — never put the key on argv (spawn logs / ps).
+        if (options.extraArgs?.length) {
+          args.push(...options.extraArgs);
+        }
+        args.push(prompt);
+
+        await onLog(
+          `Starting Cursor CLI (${command}) in ${cwd}` + (model ? ` model=${model}` : ""),
+          "status",
+        );
+
+        return runCliProcess({
+          command,
+          args,
+          cwd,
+          env: options.apiKey?.trim() ? { CURSOR_API_KEY: options.apiKey.trim() } : undefined,
+          signal,
+          onLog,
+          onStdoutLine: async (line) => {
+            const obj = tryParseJsonLine(line);
+            if (!obj) return false;
+            const summary = summarizeCursorCliEvent(obj);
+            if (summary) {
+              if (
+                obj.type === "assistant" ||
+                obj.type === "message" ||
+                obj.type === "text" ||
+                obj.type === "result"
+              ) {
+                lastAssistant = summary;
+              }
+              await onLog(summary.slice(0, 7_000), "log");
+            }
+            return true;
+          },
+        });
+      };
+
+      let result = await spawnOnce();
+      const resolvedModel = () => model || "default";
 
       if (result.cancelled || signal.aborted) {
         return {
           status: "cancelled",
           summary: lastAssistant || "Cancelled",
-          model: resolvedModel,
+          model: resolvedModel(),
         };
       }
 
       if (result.code !== 0) {
-        const errTail = (result.stderr || result.stdout).trim().slice(-4_000);
+        const rejection = parseCursorCliModelRejection(result.stderr || result.stdout);
+        const fallback = rejection
+          ? pickClosestCursorCliModel(rejection.rejected, rejection.available)
+          : undefined;
+        if (fallback && fallback !== model) {
+          await onLog(
+            `Cursor CLI rejected model ${model ?? configuredModel ?? "default"}; retrying with ${fallback}`,
+            "status",
+          );
+          model = fallback;
+          lastAssistant = "";
+          result = await spawnOnce();
+        }
+      }
+
+      if (result.cancelled || signal.aborted) {
+        return {
+          status: "cancelled",
+          summary: lastAssistant || "Cancelled",
+          model: resolvedModel(),
+        };
+      }
+
+      if (result.code !== 0) {
         return {
           status: "failed",
           summary: lastAssistant,
-          error:
-            `Cursor CLI exited with code ${result.code ?? "?"}` + (errTail ? `: ${errTail}` : ""),
-          model: resolvedModel,
+          error: formatCursorCliExitError(result.code, result.stderr || result.stdout),
+          model: resolvedModel(),
         };
       }
 
       return {
         status: "succeeded",
         summary: extractFinalSummary(result.stdout, lastAssistant) || "Cursor CLI finished",
-        model: resolvedModel,
+        model: resolvedModel(),
       };
     },
   };

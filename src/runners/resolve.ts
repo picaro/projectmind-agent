@@ -476,6 +476,8 @@ export function isRetryableRunnerFailure(result: RunnerResult): boolean {
     "gateway timeout",
     "fetch exception",
     "exceeded max steps",
+    "cannot use this model",
+    "cannot use model",
     " 500",
     " 502",
     " 503",
