@@ -31,7 +31,7 @@ import {
   type WorkspaceMode,
 } from "./workspace-manager.js";
 import { restoreWorkspaceDefaultBranch, assertPathInsideManagedRoot, resolveManagedRoot } from "./managed-workspace.js";
-import { ensureTaskWorktree } from "./task-worktree.js";
+import { ensureTaskWorktree, shouldEnsureTaskWorktree } from "./task-worktree.js";
 import { prepareEnvironment } from "./environment-manager.js";
 import { errorCodeForPhase, reportPhase, type ExecutionLifecyclePhase } from "./execution-phase.js";
 import {
@@ -621,10 +621,9 @@ export async function executeClaimedJob(
       });
     }
 
-    if (
-      taskWorkspace &&
-      (taskWorkspace.status === "pending" || taskWorkspace.status === "leased")
-    ) {
+    // Rematerialize when the allocated path is gone (ready/retained after cleanup
+    // or a wiped host) — not only for first-time pending/leased prep.
+    if (taskWorkspace && shouldEnsureTaskWorktree(taskWorkspace)) {
       const ensured = await ensureTaskWorktree(taskWorkspace);
       if (!ensured.ok) {
         logLocal(job.id, `Task worktree failed: ${ensured.reason}`, "error");

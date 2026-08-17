@@ -54,7 +54,29 @@ export type EnsureTaskWorktreeResult =
   | { ok: false; reason: string };
 
 /**
- * Create the isolated worktree when claim metadata says it is still pending.
+ * Whether claim prep should materialize (or rematerialize) the task worktree.
+ *
+ * `pending` / `leased` always need creation. `ready` / `retained` / `expired`
+ * normally skip when the directory is already on disk, but must recreate when
+ * cleanup, another host, or a wiped checkout left the path missing — otherwise
+ * assertSafeWorkspace fails with "local_directory does not exist".
+ * `cleaned` / `failed` are terminal allocations; do not recreate those rows.
+ */
+export function shouldEnsureTaskWorktree(
+  prep: Pick<TaskWorkspacePrep, "status" | "localPath">,
+  existsSync: (p: string) => boolean = fs.existsSync,
+): boolean {
+  const status = prep.status.trim().toLowerCase();
+  if (!status || status === "cleaned" || status === "failed") return false;
+  if (status === "pending" || status === "leased") return true;
+  const worktree = path.resolve(prep.localPath.trim());
+  if (!worktree) return false;
+  return !existsSync(worktree);
+}
+
+/**
+ * Create the isolated worktree when claim metadata says it is still pending,
+ * or rematerialize when the allocated path is missing on disk.
  */
 export async function ensureTaskWorktree(
   prep: TaskWorkspacePrep,
@@ -84,6 +106,10 @@ export async function ensureTaskWorktree(
   if (baseInside.code !== 0 || !baseInside.stdout.trim().includes("true")) {
     return { ok: false, reason: `Base path is not a git repository: ${base}` };
   }
+
+  // Path missing but git may still list a stale worktree entry — prune so add
+  // can recreate the same path after successful-job cleanup or a wiped checkout.
+  await git(base, ["worktree", "prune"]);
 
   fs.mkdirSync(path.dirname(worktree), { recursive: true });
 
