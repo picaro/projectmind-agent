@@ -126,3 +126,203 @@ export async function ensureTaskWorktree(
 
   return { ok: true, created: true, detail: `Created worktree at ${worktree} on ${branch}` };
 }
+
+export type RemoveTaskWorktreeResult =
+  | { ok: true; removed: boolean; detail: string }
+  | { ok: false; reason: string };
+
+/**
+ * Remove a task worktree from disk. The control plane cannot do this for Mac
+ * agents (paths live on this host); call after every job that used a TaskWorkspace.
+ */
+export async function removeTaskWorktree(
+  prep: Pick<TaskWorkspacePrep, "localPath" | "baseLocalPath">,
+  deps: { runGit?: typeof runGit } = {},
+): Promise<RemoveTaskWorktreeResult> {
+  const base = path.resolve(prep.baseLocalPath.trim());
+  const worktree = path.resolve(prep.localPath.trim());
+  if (!base || !worktree) {
+    return { ok: false, reason: "Task workspace prep is missing required paths" };
+  }
+  if (!path.isAbsolute(base) || !path.isAbsolute(worktree)) {
+    return { ok: false, reason: "Task workspace paths must be absolute" };
+  }
+
+  if (!fs.existsSync(worktree)) {
+    if (fs.existsSync(base)) {
+      const git = deps.runGit ?? runGit;
+      await git(base, ["worktree", "prune"]);
+    }
+    return { ok: true, removed: false, detail: "Worktree already absent" };
+  }
+
+  const git = deps.runGit ?? runGit;
+  if (fs.existsSync(base)) {
+    const remove = await git(base, ["worktree", "remove", "--force", worktree]);
+    if (remove.code === 0) {
+      return { ok: true, removed: true, detail: `Removed worktree at ${worktree}` };
+    }
+    await git(base, ["worktree", "prune"]);
+  }
+
+  try {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `Failed to remove worktree ${worktree}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (fs.existsSync(worktree)) {
+    return { ok: false, reason: `Worktree still present after remove: ${worktree}` };
+  }
+  return { ok: true, removed: true, detail: `Removed worktree at ${worktree}` };
+}
+
+export type PruneStaleTaskWorktreesResult = {
+  scanned: number;
+  removed: number;
+  failed: number;
+  bytesFreedEstimate: number;
+  details: string[];
+};
+
+/**
+ * Delete leftover leaves under `{managedRoot}/.pm-task-workspaces/**`.
+ *
+ * The control plane often marks rows `cleaned` when the path is absent on the
+ * *server*, which leaves Mac checkouts behind forever. Run on agent startup and
+ * after jobs so disk does not grow without bound.
+ *
+ * @param maxAgeMs — only remove directories whose mtime is older than this.
+ *   `0` removes every leaf not listed in `keepPaths`.
+ */
+export function pruneStaleTaskWorktrees(input: {
+  managedRoot: string;
+  maxAgeMs?: number;
+  keepPaths?: Iterable<string>;
+  nowMs?: number;
+}): PruneStaleTaskWorktreesResult {
+  const managedRoot = path.resolve(input.managedRoot.trim());
+  const maxAgeMs = Math.max(0, input.maxAgeMs ?? 0);
+  const nowMs = input.nowMs ?? Date.now();
+  const keep = new Set(
+    [...(input.keepPaths ?? [])].map((p) => path.resolve(p.trim())).filter(Boolean),
+  );
+
+  const result: PruneStaleTaskWorktreesResult = {
+    scanned: 0,
+    removed: 0,
+    failed: 0,
+    bytesFreedEstimate: 0,
+    details: [],
+  };
+
+  const root = path.join(managedRoot, ".pm-task-workspaces");
+  if (!fs.existsSync(root)) return result;
+
+  let repoDirs: string[] = [];
+  try {
+    repoDirs = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => path.join(root, d.name));
+  } catch {
+    return result;
+  }
+
+  for (const repoDir of repoDirs) {
+    let leaves: string[] = [];
+    try {
+      leaves = fs
+        .readdirSync(repoDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => path.join(repoDir, d.name));
+    } catch {
+      continue;
+    }
+
+    for (const leaf of leaves) {
+      result.scanned += 1;
+      const resolved = path.resolve(leaf);
+      if (keep.has(resolved)) continue;
+
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(leaf).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (maxAgeMs > 0 && nowMs - mtimeMs < maxAgeMs) continue;
+
+      try {
+        // Cheap size estimate before delete (du of large trees is too slow here).
+        result.bytesFreedEstimate += estimateDirSizeBytes(leaf, 2000);
+        fs.rmSync(leaf, { recursive: true, force: true });
+        result.removed += 1;
+        result.details.push(`removed ${leaf}`);
+      } catch (err) {
+        result.failed += 1;
+        result.details.push(
+          `failed ${leaf}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    // Drop empty repo fragment dirs.
+    try {
+      if (fs.readdirSync(repoDir).length === 0) {
+        fs.rmdirSync(repoDir);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return result;
+}
+
+/** Bounded walk so prune stays fast even when a leaf is multi-GB. */
+function estimateDirSizeBytes(dir: string, maxEntries: number): number {
+  let total = 0;
+  let seen = 0;
+  const stack = [dir];
+  while (stack.length > 0 && seen < maxEntries) {
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (seen >= maxEntries) break;
+      seen += 1;
+      const full = path.join(current, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          stack.push(full);
+        } else if (entry.isFile()) {
+          total += fs.statSync(full).size;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return total;
+}
+
+/** Default: drop task worktrees idle longer than 2 hours. */
+export const DEFAULT_TASK_WORKTREE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+export function parseTaskWorktreeMaxAgeMs(
+  raw: string | undefined,
+  fallback: number = DEFAULT_TASK_WORKTREE_MAX_AGE_MS,
+): number {
+  if (raw == null || !raw.trim()) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
+}

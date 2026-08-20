@@ -31,7 +31,11 @@ import {
   type WorkspaceMode,
 } from "./workspace-manager.js";
 import { restoreWorkspaceDefaultBranch, assertPathInsideManagedRoot, resolveManagedRoot } from "./managed-workspace.js";
-import { ensureTaskWorktree, shouldEnsureTaskWorktree } from "./task-worktree.js";
+import {
+  ensureTaskWorktree,
+  removeTaskWorktree,
+  shouldEnsureTaskWorktree,
+} from "./task-worktree.js";
 import { prepareEnvironment } from "./environment-manager.js";
 import { errorCodeForPhase, reportPhase, type ExecutionLifecyclePhase } from "./execution-phase.js";
 import {
@@ -1331,6 +1335,25 @@ export async function executeClaimedJob(
       // best-effort complete
     }
   } finally {
+    // Task worktrees live on this host. Control-plane cleanup only updates DB
+    // status (paths are absent on the server), so the agent must remove them.
+    if (taskWorkspace) {
+      try {
+        const removed = await removeTaskWorktree(taskWorkspace);
+        if (!removed.ok) {
+          logLocal(job.id, `Task worktree cleanup failed: ${removed.reason}`, "error");
+        } else if (removed.removed) {
+          logLocal(job.id, `Task worktree cleanup: ${removed.detail}`);
+        }
+      } catch (err) {
+        logLocal(
+          job.id,
+          `Task worktree cleanup threw: ${err instanceof Error ? err.message : err}`,
+          "error",
+        );
+      }
+    }
+
     // Best-effort: leave the prepared base checkout on the default branch so
     // the next job is not blocked by a leftover feature branch / dirty tree.
     // Task worktrees are separate; this restores the base path from prepare.
