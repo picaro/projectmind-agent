@@ -10,6 +10,7 @@ import {
   getActiveJob,
   setActiveJob,
   shouldAbortAfterRenewFailures,
+  isFatalLeaseRenewError,
 } from "./lease-keepalive.js";
 
 describe("lease-keepalive helpers", () => {
@@ -60,6 +61,13 @@ describe("lease-keepalive helpers", () => {
     expect(shouldAbortAfterRenewFailures(MAX_CONSECUTIVE_RENEW_FAILURES - 1)).toBe(false);
     expect(shouldAbortAfterRenewFailures(MAX_CONSECUTIVE_RENEW_FAILURES)).toBe(true);
     expect(shouldAbortAfterRenewFailures(MAX_CONSECUTIVE_RENEW_FAILURES + 1)).toBe(true);
+  });
+
+  it("treats lease-ownership errors as fatal", () => {
+    expect(isFatalLeaseRenewError("Not the lease owner")).toBe(true);
+    expect(isFatalLeaseRenewError("Job already succeeded")).toBe(true);
+    expect(isFatalLeaseRenewError("Job paused")).toBe(true);
+    expect(isFatalLeaseRenewError("network down")).toBe(false);
   });
 
   it("tracks active job for shutdown farewell", () => {

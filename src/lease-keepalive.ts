@@ -11,6 +11,11 @@ export function shouldAbortAfterRenewFailures(consecutiveFailures: number): bool
   return consecutiveFailures >= MAX_CONSECUTIVE_RENEW_FAILURES;
 }
 
+/** Ownership/status errors will not recover on the next tick — abort immediately. */
+export function isFatalLeaseRenewError(error: string): boolean {
+  return /not the lease owner|job already |job paused|job cancelled/i.test(error);
+}
+
 export function formatLeaseKeepaliveStartMessage(input: {
   agentVersion: string;
   pid: number;

@@ -97,7 +97,19 @@ export function getComputerName(): string {
 }
 
 export function agentKeyForHost(host: string): string {
-  return `host:${host}`;
+  return `host:${normalizeAgentKey(host)}`;
+}
+
+/**
+ * Match control-plane `normalizeAgentKey`: macOS ComputerName often uses a
+ * typographic apostrophe (`’`), which used to claim a job and then fail
+ * renew/log with "Not the lease owner".
+ */
+export function normalizeAgentKey(key: string): string {
+  return key
+    .trim()
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"');
 }
 
 /**
@@ -109,7 +121,7 @@ import path from "node:path";
 
 export function resolveAgentKey(host: string, env: NodeJS.ProcessEnv = process.env): string {
   const override = env.IMEMORY_AGENT_KEY?.trim();
-  if (override) return override;
+  if (override) return normalizeAgentKey(override);
 
   // Allow tests or deployments to override where the agent key is persisted.
   const filePath = (env.IMEMORY_AGENT_KEY_FILE && env.IMEMORY_AGENT_KEY_FILE.trim()) ||
@@ -123,7 +135,7 @@ export function resolveAgentKey(host: string, env: NodeJS.ProcessEnv = process.e
     // requires async persistence semantics in future, refactor accordingly.
     // eslint-disable-next-line no-sync
     const syncExisting = (require("fs").existsSync(filePath) && require("fs").readFileSync(filePath, "utf8").trim()) || "";
-    if (syncExisting) return syncExisting;
+    if (syncExisting) return normalizeAgentKey(syncExisting);
   } catch {
     // ignore and fall back to generating and writing
   }

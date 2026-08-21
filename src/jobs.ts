@@ -65,6 +65,7 @@ import {
   formatLeaseRenewSuccessMessage,
   setActiveJob,
   shouldAbortAfterRenewFailures,
+  isFatalLeaseRenewError,
 } from "./lease-keepalive.js";
 
 export type ClaimedJob = {
@@ -435,7 +436,10 @@ export async function executeClaimedJob(
       });
       logLocal(job.id, failMsg, "error");
       await appendLog(client, job.id, agentKey, failMsg, "error").catch(() => {});
-      if (shouldAbortAfterRenewFailures(consecutiveRenewFailures)) {
+      if (
+        isFatalLeaseRenewError(errText) ||
+        shouldAbortAfterRenewFailures(consecutiveRenewFailures)
+      ) {
         const abortMsg = formatLeaseRenewAbortMessage({
           consecutiveFailures: consecutiveRenewFailures,
           error: errText,
@@ -469,6 +473,9 @@ export async function executeClaimedJob(
     await appendLog(client, job.id, agentKey, startMsg, "status").catch(() => {});
 
     await renewLease();
+    if (abort.signal.aborted) {
+      return;
+    }
     renewTimer = setInterval(() => {
       void renewLease();
     }, LEASE_RENEW_MS);
@@ -547,7 +554,7 @@ export async function executeClaimedJob(
 
       const onLog = (line: string) => {
         logLocal(job.id, line);
-        void appendLog(client, job.id, agentKey, line, "log");
+        void appendLog(client, job.id, agentKey, line, "log").catch(() => {});
       };
 
       // Without a binding row the path came straight from the job, which is a
@@ -707,7 +714,7 @@ export async function executeClaimedJob(
       cwd: safety.cwd,
       onLog: (line) => {
         logLocal(job.id, line);
-        void appendLog(client, job.id, agentKey, line, "log");
+        void appendLog(client, job.id, agentKey, line, "log").catch(() => {});
       },
     });
     logLocal(job.id, environment.detail);
@@ -938,7 +945,7 @@ export async function executeClaimedJob(
 
         handleRunnerResult(runner.name, result, (msg) => {
           logLocal(job.id, msg, "error");
-          void appendLog(client, job.id, agentKey, msg, "status");
+          void appendLog(client, job.id, agentKey, msg, "status").catch(() => {});
         });
 
         try {
