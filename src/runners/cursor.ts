@@ -1,4 +1,5 @@
 import type { Runner, RunnerResult } from "./types.js";
+import { buildCursorSdkMcpServers } from "../projectmind-mcp.js";
 
 function summarizeEvent(event: unknown): string {
   if (!event || typeof event !== "object") {
@@ -60,12 +61,28 @@ function summarizeEvent(event: unknown): string {
   }
 }
 
+export function cursorSdkCreateOptions(input: {
+  apiKey: string;
+  model: string;
+  cwd: string;
+  mcp?: { url: string; apiKey: string } | null;
+}): Record<string, unknown> {
+  const mcpServers =
+    input.mcp?.url && input.mcp.apiKey ? buildCursorSdkMcpServers(input.mcp) : undefined;
+  return {
+    apiKey: input.apiKey,
+    model: { id: input.model },
+    local: { cwd: input.cwd },
+    ...(mcpServers ? { mcpServers } : {}),
+  };
+}
+
 export function createCursorSdkRunner(options: { apiKey: string; model?: string }): Runner {
   const model = options.model?.trim() || "composer-2.5";
 
   return {
     name: "cursor_sdk",
-    async run({ cwd, prompt, onLog, signal }): Promise<RunnerResult> {
+    async run({ cwd, prompt, onLog, signal, mcp }): Promise<RunnerResult> {
       if (!options.apiKey) {
         return {
           status: "failed",
@@ -82,11 +99,14 @@ export function createCursorSdkRunner(options: { apiKey: string; model?: string 
 
       try {
         const createStarted = Date.now();
-        await using agent = await Agent.create({
-          apiKey: options.apiKey,
-          model: { id: model },
-          local: { cwd },
-        });
+        await using agent = await Agent.create(
+          cursorSdkCreateOptions({
+            apiKey: options.apiKey,
+            model,
+            cwd,
+            mcp,
+          }) as Parameters<typeof Agent.create>[0],
+        );
         await onLog(`Agent.create OK in ${Date.now() - createStarted}ms`, "status");
 
         const sendStarted = Date.now();

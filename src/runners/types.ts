@@ -10,6 +10,8 @@ export type RunnerInput = {
   signal: AbortSignal;
   /** Job wall-clock budget in milliseconds, when supplied by the queue. */
   timeoutMs?: number;
+  /** ProjectMind MCP so the inner model can requestEpicSubagent during the run. */
+  mcp?: { url: string; apiKey: string } | null;
 };
 
 /** Token usage / cost / timing reported by the underlying CLI, when it exposes one. */

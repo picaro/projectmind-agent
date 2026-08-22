@@ -1,5 +1,6 @@
 import { runCliProcess, tryParseJsonLine } from "./cli-process.js";
 import type { Runner, RunnerResult, RunnerUsageStats } from "./types.js";
+import { appendCliMcpArgs } from "../projectmind-mcp.js";
 
 /**
  * Claude Code's `stream-json` terminal event carries usage/cost/timing, e.g.:
@@ -137,7 +138,7 @@ export function createClaudeCliRunner(options: {
 
   return {
     name: "claude_cli",
-    async run({ cwd, prompt, onLog, signal }): Promise<RunnerResult> {
+    async run({ cwd, prompt, onLog, signal, mcp }): Promise<RunnerResult> {
       const args: string[] = ["-p", "--output-format", "stream-json", "--verbose"];
 
       if (model) {
@@ -151,7 +152,8 @@ export function createClaudeCliRunner(options: {
       if (options.extraArgs?.length) {
         args.push(...options.extraArgs);
       }
-      args.push(prompt);
+      const spawnArgs = appendCliMcpArgs(args, mcp);
+      spawnArgs.push(prompt);
 
       await onLog(
         `Starting Claude CLI (${command}) in ${cwd}` +
@@ -177,7 +179,7 @@ export function createClaudeCliRunner(options: {
 
       const result = await runCliProcess({
         command,
-        args,
+        args: spawnArgs,
         cwd,
         env: Object.keys(env).length ? env : undefined,
         signal,

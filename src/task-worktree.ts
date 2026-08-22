@@ -1,5 +1,6 @@
 /**
- * Ensure a TaskWorkspace git worktree exists on the Mac agent host.
+ * Ensure a TaskWorkspace git worktree exists on the Mac agent host,
+ * and delete it when the job is done so leftover checkouts cannot fill the disk.
  * Uses execFile — never concatenates untrusted strings into a shell.
  */
 
@@ -7,8 +8,31 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { resolveManagedRoot } from "./managed-workspace.js";
 
 const execFileAsync = promisify(execFile);
+
+/** Directory name used by the control plane for isolated per-task worktrees. */
+export const TASK_WORKSPACE_DIR_NAME = ".pm-task-workspaces";
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/**
+ * True when `localPath` is an isolated task worktree under this agent's managed
+ * root. Anything else (allowlisted checkouts, managed project clones) must never
+ * be deleted by worktree cleanup.
+ */
+export function isDisposableTaskWorkspacePath(localPath: string, managedRoot: string): boolean {
+  const root = path.resolve(managedRoot.trim());
+  const target = path.resolve((localPath ?? "").trim());
+  if (!root || !target || !path.isAbsolute(target)) return false;
+  if (!isPathInside(root, target) || target === root) return false;
+  const rel = path.relative(root, target);
+  return rel.split(path.sep).includes(TASK_WORKSPACE_DIR_NAME);
+}
 
 export type TaskWorkspacePrep = {
   id: string;
@@ -17,6 +41,10 @@ export type TaskWorkspacePrep = {
   branchName: string;
   baseBranch: string;
   status: string;
+  /** Control-plane hint: always run worktree add before using cwd. */
+  mustMaterialize?: boolean;
+  /** Control-plane hint: rematerialize when the leaf is missing on disk. */
+  recreateIfMissing?: boolean;
 };
 
 async function runGit(
@@ -56,27 +84,32 @@ export type EnsureTaskWorktreeResult =
 /**
  * Whether claim prep should materialize (or rematerialize) the task worktree.
  *
- * `pending` / `leased` always need creation. `ready` / `retained` / `expired`
- * normally skip when the directory is already on disk, but must recreate when
- * cleanup, another host, or a wiped checkout left the path missing — otherwise
- * assertSafeWorkspace fails with "local_directory does not exist".
- * `cleaned` / `failed` are terminal allocations; do not recreate those rows.
+ * Prefer explicit `mustMaterialize` / `recreateIfMissing` from the control plane
+ * when present. Otherwise: `pending` / `leased` always need creation;
+ * `ready` / `retained` / `expired` recreate when the path is missing;
+ * `cleaned` / `failed` are terminal allocations.
  */
 export function shouldEnsureTaskWorktree(
-  prep: Pick<TaskWorkspacePrep, "status" | "localPath">,
+  prep: Pick<
+    TaskWorkspacePrep,
+    "status" | "localPath" | "mustMaterialize" | "recreateIfMissing"
+  >,
   existsSync: (p: string) => boolean = fs.existsSync,
 ): boolean {
+  if (prep.mustMaterialize === true) return true;
   const status = prep.status.trim().toLowerCase();
   if (!status || status === "cleaned" || status === "failed") return false;
   if (status === "pending" || status === "leased") return true;
   const worktree = path.resolve(prep.localPath.trim());
   if (!worktree) return false;
+  if (prep.recreateIfMissing === false) return false;
+  // Default (and recreateIfMissing: true): rematerialize when the leaf is gone.
   return !existsSync(worktree);
 }
 
 /**
  * Create the isolated worktree when claim metadata says it is still pending,
- * or rematerialize when the allocated path is missing on disk.
+ * or rematerialize when the allocated path is missing / broken on disk.
  */
 export async function ensureTaskWorktree(
   prep: TaskWorkspacePrep,
@@ -99,7 +132,17 @@ export async function ensureTaskWorktree(
     if (inside.code === 0 && inside.stdout.trim().includes("true")) {
       return { ok: true, created: false, detail: "Worktree already present" };
     }
-    return { ok: false, reason: `Path exists but is not a git worktree: ${worktree}` };
+    // Empty or broken leaf — remove and recreate (first-time reprovision).
+    try {
+      fs.rmSync(worktree, { recursive: true, force: true });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `Path exists but is not a git worktree and could not be removed: ${worktree} (${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      };
+    }
   }
 
   const baseInside = await git(base, ["rev-parse", "--is-inside-work-tree"]);
@@ -132,31 +175,37 @@ export type RemoveTaskWorktreeResult =
   | { ok: false; reason: string };
 
 /**
- * Remove a task worktree from disk. The control plane cannot do this for Mac
- * agents (paths live on this host); call after every job that used a TaskWorkspace.
+ * Remove one task worktree from disk. Refuses paths that are not under
+ * `{managedRoot}/.pm-task-workspaces`.
  */
 export async function removeTaskWorktree(
   prep: Pick<TaskWorkspacePrep, "localPath" | "baseLocalPath">,
-  deps: { runGit?: typeof runGit } = {},
+  deps: { runGit?: typeof runGit; managedRoot?: string } = {},
 ): Promise<RemoveTaskWorktreeResult> {
-  const base = path.resolve(prep.baseLocalPath.trim());
-  const worktree = path.resolve(prep.localPath.trim());
-  if (!base || !worktree) {
-    return { ok: false, reason: "Task workspace prep is missing required paths" };
+  const managedRoot = deps.managedRoot ?? resolveManagedRoot();
+  const worktree = path.resolve((prep.localPath ?? "").trim());
+  const base = path.resolve((prep.baseLocalPath ?? "").trim());
+  if (!worktree || !path.isAbsolute(worktree)) {
+    return { ok: false, reason: "Task workspace path is missing" };
   }
-  if (!path.isAbsolute(base) || !path.isAbsolute(worktree)) {
-    return { ok: false, reason: "Task workspace paths must be absolute" };
+  if (!base || !path.isAbsolute(base)) {
+    return { ok: false, reason: "Task workspace base path is missing" };
+  }
+  if (!isDisposableTaskWorkspacePath(worktree, managedRoot)) {
+    return {
+      ok: false,
+      reason: `Refusing to delete non-task-workspace path: ${worktree}`,
+    };
   }
 
+  const git = deps.runGit ?? runGit;
   if (!fs.existsSync(worktree)) {
     if (fs.existsSync(base)) {
-      const git = deps.runGit ?? runGit;
       await git(base, ["worktree", "prune"]);
     }
     return { ok: true, removed: false, detail: "Worktree already absent" };
   }
 
-  const git = deps.runGit ?? runGit;
   if (fs.existsSync(base)) {
     const remove = await git(base, ["worktree", "remove", "--force", worktree]);
     if (remove.code === 0) {
@@ -188,22 +237,41 @@ export type PruneStaleTaskWorktreesResult = {
   details: string[];
 };
 
+async function pruneRegisteredWorktrees(
+  managedRoot: string,
+  git: typeof runGit,
+): Promise<void> {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(managedRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory() || ent.name === TASK_WORKSPACE_DIR_NAME) continue;
+    const repo = path.join(managedRoot, ent.name);
+    if (!fs.existsSync(path.join(repo, ".git"))) continue;
+    await git(repo, ["worktree", "prune"]);
+  }
+}
+
 /**
  * Delete leftover leaves under `{managedRoot}/.pm-task-workspaces/**`.
  *
  * The control plane often marks rows `cleaned` when the path is absent on the
  * *server*, which leaves Mac checkouts behind forever. Run on agent startup and
- * after jobs so disk does not grow without bound.
+ * before/after jobs so disk does not grow without bound.
  *
  * @param maxAgeMs — only remove directories whose mtime is older than this.
  *   `0` removes every leaf not listed in `keepPaths`.
  */
-export function pruneStaleTaskWorktrees(input: {
+export async function pruneStaleTaskWorktrees(input: {
   managedRoot: string;
   maxAgeMs?: number;
   keepPaths?: Iterable<string>;
   nowMs?: number;
-}): PruneStaleTaskWorktreesResult {
+  runGit?: typeof runGit;
+}): Promise<PruneStaleTaskWorktreesResult> {
   const managedRoot = path.resolve(input.managedRoot.trim());
   const maxAgeMs = Math.max(0, input.maxAgeMs ?? 0);
   const nowMs = input.nowMs ?? Date.now();
@@ -219,7 +287,7 @@ export function pruneStaleTaskWorktrees(input: {
     details: [],
   };
 
-  const root = path.join(managedRoot, ".pm-task-workspaces");
+  const root = path.join(managedRoot, TASK_WORKSPACE_DIR_NAME);
   if (!fs.existsSync(root)) return result;
 
   let repoDirs: string[] = [];
@@ -246,6 +314,11 @@ export function pruneStaleTaskWorktrees(input: {
     for (const leaf of leaves) {
       result.scanned += 1;
       const resolved = path.resolve(leaf);
+      if (!isDisposableTaskWorkspacePath(resolved, managedRoot)) {
+        result.failed += 1;
+        result.details.push(`skipped unexpected path ${leaf}`);
+        continue;
+      }
       if (keep.has(resolved)) continue;
 
       let mtimeMs = 0;
@@ -257,7 +330,6 @@ export function pruneStaleTaskWorktrees(input: {
       if (maxAgeMs > 0 && nowMs - mtimeMs < maxAgeMs) continue;
 
       try {
-        // Cheap size estimate before delete (du of large trees is too slow here).
         result.bytesFreedEstimate += estimateDirSizeBytes(leaf, 2000);
         fs.rmSync(leaf, { recursive: true, force: true });
         result.removed += 1;
@@ -270,7 +342,6 @@ export function pruneStaleTaskWorktrees(input: {
       }
     }
 
-    // Drop empty repo fragment dirs.
     try {
       if (fs.readdirSync(repoDir).length === 0) {
         fs.rmdirSync(repoDir);
@@ -280,6 +351,8 @@ export function pruneStaleTaskWorktrees(input: {
     }
   }
 
+  const git = input.runGit ?? runGit;
+  await pruneRegisteredWorktrees(managedRoot, git);
   return result;
 }
 
@@ -325,4 +398,16 @@ export function parseTaskWorktreeMaxAgeMs(
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) return fallback;
   return Math.floor(value);
+}
+
+export function formatTaskWorktreePruneLog(result: PruneStaleTaskWorktreesResult): string | null {
+  if (result.removed === 0 && result.failed === 0) return null;
+  const parts: string[] = [];
+  if (result.removed > 0) {
+    parts.push(`pruned ${result.removed} leftover task worktree(s)`);
+  }
+  if (result.failed > 0) {
+    parts.push(`${result.failed} error(s): ${result.details.find((d) => d.startsWith("failed") || d.startsWith("skipped")) ?? "see details"}`);
+  }
+  return parts.join("; ");
 }

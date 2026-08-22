@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   ensureTaskWorktree,
+  isDisposableTaskWorkspacePath,
   pruneStaleTaskWorktrees,
   removeTaskWorktree,
   shouldEnsureTaskWorktree,
 } from "./task-worktree.js";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -33,6 +35,24 @@ function testTempRoot(prefix: string): string {
 }
 
 describe("shouldEnsureTaskWorktree", () => {
+  it("honors mustMaterialize even when the path already exists", () => {
+    expect(
+      shouldEnsureTaskWorktree(
+        { status: "ready", localPath: "/present", mustMaterialize: true },
+        () => true,
+      ),
+    ).toBe(true);
+  });
+
+  it("skips recreate when recreateIfMissing is false and path is missing", () => {
+    expect(
+      shouldEnsureTaskWorktree(
+        { status: "ready", localPath: "/gone", recreateIfMissing: false },
+        () => false,
+      ),
+    ).toBe(false);
+  });
+
   it("always materializes pending and leased", () => {
     expect(
       shouldEnsureTaskWorktree(
@@ -151,13 +171,64 @@ describe("ensureTaskWorktree", () => {
     if (recreated.ok) expect(recreated.created).toBe(true);
     expect(fs.existsSync(path.join(wt, "README.md"))).toBe(true);
   });
+
+  it("removes a broken non-git leaf and recreates the worktree", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "mac-tw-broken-"));
+    const base = path.join(root, "base");
+    const wt = path.join(root, "tasks", "t-broken");
+    initRepo(base);
+    fs.mkdirSync(wt, { recursive: true });
+    fs.writeFileSync(path.join(wt, "junk.txt"), "not a worktree\n");
+
+    const recreated = await ensureTaskWorktree({
+      id: "tw-broken",
+      localPath: wt,
+      baseLocalPath: base,
+      branchName: "pm/task/broken1",
+      baseBranch: "main",
+      status: "pending",
+      mustMaterialize: true,
+    });
+    expect(recreated.ok).toBe(true);
+    if (recreated.ok) expect(recreated.created).toBe(true);
+    expect(fs.existsSync(path.join(wt, "README.md"))).toBe(true);
+  });
+});
+
+describe("isDisposableTaskWorkspacePath", () => {
+  it("accepts isolated task worktrees under the managed root", () => {
+    expect(
+      isDisposableTaskWorkspacePath(
+        "/Users/me/.imemory/workspaces/.pm-task-workspaces/abc/task-1",
+        "/Users/me/.imemory/workspaces",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects managed project clones and paths outside the root", () => {
+    expect(
+      isDisposableTaskWorkspacePath(
+        "/Users/me/.imemory/workspaces/imemory",
+        "/Users/me/.imemory/workspaces",
+      ),
+    ).toBe(false);
+    expect(
+      isDisposableTaskWorkspacePath("/Users/me/code/secret", "/Users/me/.imemory/workspaces"),
+    ).toBe(false);
+    expect(
+      isDisposableTaskWorkspacePath(
+        "/Users/me/.imemory/workspaces",
+        "/Users/me/.imemory/workspaces",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("removeTaskWorktree", () => {
-  it("removes a worktree created by ensureTaskWorktree", async () => {
+  it("removes a created worktree from disk", async () => {
     const root = testTempRoot("mac-tw-rm-");
     const base = path.join(root, "base");
-    const wt = path.join(root, "tasks", "t-rm");
+    const wt = path.join(root, ".pm-task-workspaces", "repo", "t1");
     initRepo(base);
 
     const created = await ensureTaskWorktree({
@@ -169,22 +240,66 @@ describe("removeTaskWorktree", () => {
       status: "pending",
     });
     expect(created.ok).toBe(true);
-    expect(fs.existsSync(wt)).toBe(true);
+    expect(fs.existsSync(path.join(wt, "README.md"))).toBe(true);
 
-    const removed = await removeTaskWorktree({ localPath: wt, baseLocalPath: base });
+    const removed = await removeTaskWorktree(
+      { localPath: wt, baseLocalPath: base },
+      { managedRoot: root },
+    );
     expect(removed.ok).toBe(true);
     if (removed.ok) expect(removed.removed).toBe(true);
     expect(fs.existsSync(wt)).toBe(false);
 
-    const again = await removeTaskWorktree({ localPath: wt, baseLocalPath: base });
+    const again = await removeTaskWorktree(
+      { localPath: wt, baseLocalPath: base },
+      { managedRoot: root },
+    );
     expect(again.ok).toBe(true);
     if (again.ok) expect(again.removed).toBe(false);
+  });
+
+  it("refuses to delete a managed project clone", async () => {
+    const root = testTempRoot("mac-tw-refuse-");
+    const clone = path.join(root, "imemory");
+    fs.mkdirSync(clone, { recursive: true });
+    fs.writeFileSync(path.join(clone, "keep.txt"), "do not delete\n");
+
+    const refused = await removeTaskWorktree(
+      { localPath: clone, baseLocalPath: clone },
+      { managedRoot: root },
+    );
+    expect(refused.ok).toBe(false);
+    expect(fs.existsSync(path.join(clone, "keep.txt"))).toBe(true);
   });
 });
 
 describe("pruneStaleTaskWorktrees", () => {
-  it("removes aged leaves and keeps fresh or keepPaths entries", () => {
+  it("prunes leftover task worktrees while keeping the active one and sibling clones", async () => {
     const root = testTempRoot("mac-tw-prune-");
+    const stale = path.join(root, ".pm-task-workspaces", "repo", "old");
+    const active = path.join(root, ".pm-task-workspaces", "repo", "current");
+    const clone = path.join(root, "imemory");
+    fs.mkdirSync(stale, { recursive: true });
+    fs.mkdirSync(active, { recursive: true });
+    fs.mkdirSync(clone, { recursive: true });
+    fs.writeFileSync(path.join(stale, "gone.txt"), "stale\n");
+    fs.writeFileSync(path.join(active, "keep.txt"), "active\n");
+    fs.writeFileSync(path.join(clone, "repo.txt"), "clone\n");
+
+    const pruned = await pruneStaleTaskWorktrees({
+      managedRoot: root,
+      maxAgeMs: 0,
+      keepPaths: [active],
+    });
+    expect(pruned.removed).toBe(1);
+    expect(pruned.details.some((d) => d.includes(stale))).toBe(true);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(path.join(active, "keep.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(clone, "repo.txt"))).toBe(true);
+  });
+
+  it("removes aged leaves and keeps fresh or keepPaths entries", async () => {
+    const root = testTempRoot("mac-tw-prune-age-");
     const repo = path.join(root, ".pm-task-workspaces", "repofrag");
     const oldLeaf = path.join(repo, "old-leaf");
     const freshLeaf = path.join(repo, "fresh-leaf");
@@ -199,7 +314,7 @@ describe("pruneStaleTaskWorktrees", () => {
     fs.utimesSync(freshLeaf, new Date(now), new Date(now));
     fs.utimesSync(keepLeaf, new Date(now - 10_000), new Date(now - 10_000));
 
-    const pruned = pruneStaleTaskWorktrees({
+    const pruned = await pruneStaleTaskWorktrees({
       managedRoot: root,
       maxAgeMs: 5_000,
       keepPaths: [keepLeaf],
@@ -212,7 +327,7 @@ describe("pruneStaleTaskWorktrees", () => {
     expect(fs.existsSync(keepLeaf)).toBe(true);
   });
 
-  it("with maxAgeMs=0 removes every leaf except keepPaths", () => {
+  it("with maxAgeMs=0 removes every leaf except keepPaths", async () => {
     const root = testTempRoot("mac-tw-prune0-");
     const repo = path.join(root, ".pm-task-workspaces", "repofrag");
     const a = path.join(repo, "a");
@@ -220,7 +335,7 @@ describe("pruneStaleTaskWorktrees", () => {
     fs.mkdirSync(a, { recursive: true });
     fs.mkdirSync(b, { recursive: true });
 
-    const pruned = pruneStaleTaskWorktrees({
+    const pruned = await pruneStaleTaskWorktrees({
       managedRoot: root,
       maxAgeMs: 0,
       keepPaths: [b],
