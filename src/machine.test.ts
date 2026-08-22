@@ -31,10 +31,17 @@ describe("machine", () => {
     expect(agentKindFromPlatform("linux")).toBe("other");
   });
 
+  it("agentKeyForHost normalizes typographic apostrophes", () => {
+    expect(agentKeyForHost("Alex\u2019s Mac mini")).toBe("host:Alex's Mac mini");
+  });
+
   it("resolveAgentKey prefers IMEMORY_AGENT_KEY override and can persist to file", () => {
     expect(resolveAgentKey("Mac", { IMEMORY_AGENT_KEY: " opaque-key " } as NodeJS.ProcessEnv)).toBe(
       "opaque-key",
     );
+    expect(
+      resolveAgentKey("Mac", { IMEMORY_AGENT_KEY: "host:Alex\u2019s Mac" } as NodeJS.ProcessEnv),
+    ).toBe("host:Alex's Mac");
     // Use a repo-local temp path so tests don't write to the developer home directory.
     const tmpFile = require("path").resolve(process.cwd(), "src", ".tmp-agent-key");
     // Ensure no leftover file

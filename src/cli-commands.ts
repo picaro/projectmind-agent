@@ -407,12 +407,14 @@ export async function runPruneWorktreesCommand(): Promise<number> {
   );
   const managedRoot = resolveManagedRoot();
   console.log(`Pruning leftover task worktrees under ${managedRoot}…`);
-  const result = await pruneStaleTaskWorktrees({ managedRoot });
+  const result = await pruneStaleTaskWorktrees({ managedRoot, maxAgeMs: 0 });
   const log = formatTaskWorktreePruneLog(result);
   if (log) console.log(log);
   else console.log("No leftover task worktrees.");
-  for (const err of result.errors) console.error(err);
-  return result.errors.length > 0 ? 1 : 0;
+  for (const detail of result.details.filter((d) => d.startsWith("failed"))) {
+    console.error(detail);
+  }
+  return result.failed > 0 ? 1 : 0;
 }
 
 export type CliCommand =

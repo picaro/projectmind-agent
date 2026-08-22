@@ -28,6 +28,7 @@ mac-agent/dist-release/
 coverage/
 **/.tmp/
 .tmp/
+.tmp-test/
 tmp/
 temp/
 *.tmp

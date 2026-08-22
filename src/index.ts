@@ -17,7 +17,7 @@ import { parseAllowlist } from "./safety.js";
 import { runHealthCheck } from "./health-check.js";
 import { resolveManagedRoot } from "./managed-workspace.js";
 import {
-  formatTaskWorktreePruneLog,
+  parseTaskWorktreeMaxAgeMs,
   pruneStaleTaskWorktrees,
 } from "./task-worktree.js";
 import { getAgentBuildDate, getAgentVersion } from "./agent-version.js";
@@ -379,6 +379,30 @@ async function main(): Promise<void> {
   
   console.log("\nPress Ctrl+C to stop\n");
 
+  // Drop orphaned task worktrees left behind when control-plane "cleanup"
+  // only marked DB rows cleaned (paths live on this Mac, not the server).
+  try {
+    const managedRoot = resolveManagedRoot();
+    const maxAgeMs = parseTaskWorktreeMaxAgeMs(
+      process.env.IMEMORY_TASK_WORKTREE_MAX_AGE_MS,
+    );
+    const pruned = await pruneStaleTaskWorktrees({ managedRoot, maxAgeMs });
+    if (pruned.scanned > 0) {
+      const freedMb = Math.round(pruned.bytesFreedEstimate / (1024 * 1024));
+      console.log(
+        `Task worktree prune: scanned=${pruned.scanned} removed=${pruned.removed}` +
+          (pruned.failed ? ` failed=${pruned.failed}` : "") +
+          (freedMb > 0 ? ` (~${freedMb}MB sampled)` : "") +
+          ` (maxAge=${maxAgeMs}ms under ${managedRoot}/.pm-task-workspaces)`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "Task worktree prune skipped:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
   if (autoUpdate) {
     try {
       const update = await maybeSelfUpdate(mcpUrl, { busy: false });
@@ -458,17 +482,6 @@ async function main(): Promise<void> {
     await maybeRunHealthCheck(client, agentMeta, info.agentKey, runState);
   } catch (err) {
     console.error("Initial heartbeat failed:", err instanceof Error ? err.message : err);
-  }
-
-  try {
-    const pruned = await pruneStaleTaskWorktrees({ managedRoot: resolveManagedRoot() });
-    const pruneLog = formatTaskWorktreePruneLog(pruned);
-    if (pruneLog) console.log(`Task worktrees: ${pruneLog}`);
-  } catch (err) {
-    console.error(
-      "Task worktree prune failed:",
-      err instanceof Error ? err.message : err,
-    );
   }
 
   let pollCount = 0;

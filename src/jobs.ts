@@ -70,6 +70,7 @@ import {
   formatLeaseRenewSuccessMessage,
   setActiveJob,
   shouldAbortAfterRenewFailures,
+  isFatalLeaseRenewError,
 } from "./lease-keepalive.js";
 
 export type ClaimedJob = {
@@ -490,7 +491,10 @@ export async function executeClaimedJob(
       });
       logLocal(job.id, failMsg, "error");
       await appendLog(client, job.id, agentKey, failMsg, "error").catch(() => {});
-      if (shouldAbortAfterRenewFailures(consecutiveRenewFailures)) {
+      if (
+        isFatalLeaseRenewError(errText) ||
+        shouldAbortAfterRenewFailures(consecutiveRenewFailures)
+      ) {
         const abortMsg = formatLeaseRenewAbortMessage({
           consecutiveFailures: consecutiveRenewFailures,
           error: errText,
@@ -524,6 +528,9 @@ export async function executeClaimedJob(
     await appendLog(client, job.id, agentKey, startMsg, "status").catch(() => {});
 
     await renewLease();
+    if (abort.signal.aborted) {
+      return;
+    }
     renewTimer = setInterval(() => {
       void renewLease();
     }, LEASE_RENEW_MS);
@@ -630,7 +637,7 @@ export async function executeClaimedJob(
 
       const onLog = (line: string) => {
         logLocal(job.id, line);
-        void appendLog(client, job.id, agentKey, line, "log");
+        void appendLog(client, job.id, agentKey, line, "log").catch(() => {});
       };
 
       // Without a binding row the path came straight from the job, which is a
@@ -719,6 +726,7 @@ export async function executeClaimedJob(
       );
       const pruned = await pruneStaleTaskWorktrees({
         managedRoot: managedRootForTasks,
+        maxAgeMs: 0,
         keepPaths,
       });
       const pruneLog = formatTaskWorktreePruneLog(pruned);
@@ -741,7 +749,11 @@ export async function executeClaimedJob(
         /no space left on device/i.test(ensured.reason)
       ) {
         logLocal(job.id, "Task worktree add hit ENOSPC — pruning leftovers and retrying");
-        await pruneStaleTaskWorktrees({ managedRoot: managedRootForTasks, keepPaths: [] });
+        await pruneStaleTaskWorktrees({
+          managedRoot: managedRootForTasks,
+          maxAgeMs: 0,
+          keepPaths: [],
+        });
         ensured = await ensureTaskWorktree(taskWorkspace);
       }
       if (!ensured.ok) {
@@ -822,7 +834,7 @@ export async function executeClaimedJob(
       cwd: safety.cwd,
       onLog: (line) => {
         logLocal(job.id, line);
-        void appendLog(client, job.id, agentKey, line, "log");
+        void appendLog(client, job.id, agentKey, line, "log").catch(() => {});
       },
     });
     logLocal(job.id, environment.detail);
@@ -1054,7 +1066,7 @@ export async function executeClaimedJob(
 
         handleRunnerResult(runner.name, result, (msg) => {
           logLocal(job.id, msg, "error");
-          void appendLog(client, job.id, agentKey, msg, "status");
+          void appendLog(client, job.id, agentKey, msg, "status").catch(() => {});
         });
 
         try {
@@ -1451,6 +1463,25 @@ export async function executeClaimedJob(
       // best-effort complete
     }
   } finally {
+    // Task worktrees live on this host. Control-plane cleanup only updates DB
+    // status (paths are absent on the server), so the agent must remove them.
+    if (taskWorkspace) {
+      try {
+        const removed = await removeTaskWorktree(taskWorkspace);
+        if (!removed.ok) {
+          logLocal(job.id, `Task worktree cleanup failed: ${removed.reason}`, "error");
+        } else if (removed.removed) {
+          logLocal(job.id, `Task worktree cleanup: ${removed.detail}`);
+        }
+      } catch (err) {
+        logLocal(
+          job.id,
+          `Task worktree cleanup threw: ${err instanceof Error ? err.message : err}`,
+          "error",
+        );
+      }
+    }
+
     // Best-effort: leave the prepared base checkout on the default branch so
     // the next job is not blocked by a leftover feature branch / dirty tree.
     // Task worktrees are separate; this restores the base path from prepare.
@@ -1474,25 +1505,6 @@ export async function executeClaimedJob(
         logLocal(
           job.id,
           `Workspace cleanup threw: ${err instanceof Error ? err.message : err}`,
-          "error",
-        );
-      }
-    }
-    // Isolated task worktrees are disposable. The control plane cannot delete
-    // files on this Mac, so leftover `.pm-task-workspaces` dirs used to grow
-    // until the disk filled. Always remove after the job, including failures.
-    if (taskWorkspace) {
-      try {
-        const removed = await removeTaskWorktree(taskWorkspace);
-        if (!removed.ok) {
-          logLocal(job.id, `Task worktree cleanup skipped: ${removed.reason}`, "error");
-        } else if (removed.removed) {
-          logLocal(job.id, `Task worktree cleanup: ${removed.detail}`);
-        }
-      } catch (err) {
-        logLocal(
-          job.id,
-          `Task worktree cleanup threw: ${err instanceof Error ? err.message : err}`,
           "error",
         );
       }

@@ -188,6 +188,9 @@ export async function removeTaskWorktree(
   if (!worktree || !path.isAbsolute(worktree)) {
     return { ok: false, reason: "Task workspace path is missing" };
   }
+  if (!base || !path.isAbsolute(base)) {
+    return { ok: false, reason: "Task workspace base path is missing" };
+  }
   if (!isDisposableTaskWorkspacePath(worktree, managedRoot)) {
     return {
       ok: false,
@@ -197,15 +200,15 @@ export async function removeTaskWorktree(
 
   const git = deps.runGit ?? runGit;
   if (!fs.existsSync(worktree)) {
-    if (base && path.isAbsolute(base) && fs.existsSync(base)) {
+    if (fs.existsSync(base)) {
       await git(base, ["worktree", "prune"]);
     }
     return { ok: true, removed: false, detail: "Worktree already absent" };
   }
 
-  if (base && path.isAbsolute(base) && fs.existsSync(base)) {
-    const removed = await git(base, ["worktree", "remove", "--force", worktree]);
-    if (removed.code === 0) {
+  if (fs.existsSync(base)) {
+    const remove = await git(base, ["worktree", "remove", "--force", worktree]);
+    if (remove.code === 0) {
       return { ok: true, removed: true, detail: `Removed worktree at ${worktree}` };
     }
     await git(base, ["worktree", "prune"]);
@@ -216,51 +219,23 @@ export async function removeTaskWorktree(
   } catch (err) {
     return {
       ok: false,
-      reason: `Failed to delete worktree ${worktree}: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `Failed to remove worktree ${worktree}: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+
+  if (fs.existsSync(worktree)) {
+    return { ok: false, reason: `Worktree still present after remove: ${worktree}` };
   }
   return { ok: true, removed: true, detail: `Removed worktree at ${worktree}` };
 }
 
 export type PruneStaleTaskWorktreesResult = {
-  removed: string[];
-  kept: string[];
-  errors: string[];
+  scanned: number;
+  removed: number;
+  failed: number;
+  bytesFreedEstimate: number;
+  details: string[];
 };
-
-function listTaskWorkspaceLeaves(taskRoot: string): string[] {
-  const leaves: string[] = [];
-  let repos: fs.Dirent[];
-  try {
-    repos = fs.readdirSync(taskRoot, { withFileTypes: true });
-  } catch {
-    return leaves;
-  }
-  for (const repo of repos) {
-    if (!repo.isDirectory()) continue;
-    const repoDir = path.join(taskRoot, repo.name);
-    let children: fs.Dirent[];
-    try {
-      children = fs.readdirSync(repoDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const child of children) {
-      if (child.isDirectory()) leaves.push(path.join(repoDir, child.name));
-    }
-  }
-  return leaves;
-}
-
-function normalizeKeepPaths(keepPaths: string[] | undefined): Set<string> {
-  const keep = new Set<string>();
-  for (const raw of keepPaths ?? []) {
-    const trimmed = raw?.trim();
-    if (!trimmed) continue;
-    keep.add(path.resolve(trimmed));
-  }
-  return keep;
-}
 
 async function pruneRegisteredWorktrees(
   managedRoot: string,
@@ -281,73 +256,158 @@ async function pruneRegisteredWorktrees(
 }
 
 /**
- * Delete leftover isolated task worktrees under `{managedRoot}/.pm-task-workspaces`.
- * Never touches managed project clones or allowlisted paths. `keepPaths` are
- * skipped (the job currently running).
+ * Delete leftover leaves under `{managedRoot}/.pm-task-workspaces/**`.
+ *
+ * The control plane often marks rows `cleaned` when the path is absent on the
+ * *server*, which leaves Mac checkouts behind forever. Run on agent startup and
+ * before/after jobs so disk does not grow without bound.
+ *
+ * @param maxAgeMs — only remove directories whose mtime is older than this.
+ *   `0` removes every leaf not listed in `keepPaths`.
  */
 export async function pruneStaleTaskWorktrees(input: {
   managedRoot: string;
-  keepPaths?: string[];
+  maxAgeMs?: number;
+  keepPaths?: Iterable<string>;
+  nowMs?: number;
   runGit?: typeof runGit;
 }): Promise<PruneStaleTaskWorktreesResult> {
   const managedRoot = path.resolve(input.managedRoot.trim());
-  const result: PruneStaleTaskWorktreesResult = { removed: [], kept: [], errors: [] };
-  if (!managedRoot || !path.isAbsolute(managedRoot)) {
-    result.errors.push("managedRoot must be an absolute path");
+  const maxAgeMs = Math.max(0, input.maxAgeMs ?? 0);
+  const nowMs = input.nowMs ?? Date.now();
+  const keep = new Set(
+    [...(input.keepPaths ?? [])].map((p) => path.resolve(p.trim())).filter(Boolean),
+  );
+
+  const result: PruneStaleTaskWorktreesResult = {
+    scanned: 0,
+    removed: 0,
+    failed: 0,
+    bytesFreedEstimate: 0,
+    details: [],
+  };
+
+  const root = path.join(managedRoot, TASK_WORKSPACE_DIR_NAME);
+  if (!fs.existsSync(root)) return result;
+
+  let repoDirs: string[] = [];
+  try {
+    repoDirs = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => path.join(root, d.name));
+  } catch {
     return result;
   }
 
-  const taskRoot = path.join(managedRoot, TASK_WORKSPACE_DIR_NAME);
-  if (!fs.existsSync(taskRoot)) return result;
-
-  const keep = normalizeKeepPaths(input.keepPaths);
-  const git = input.runGit ?? runGit;
-
-  for (const leaf of listTaskWorkspaceLeaves(taskRoot)) {
-    if (!isDisposableTaskWorkspacePath(leaf, managedRoot)) {
-      result.errors.push(`Skipped unexpected path: ${leaf}`);
-      continue;
-    }
-    if (keep.has(path.resolve(leaf))) {
-      result.kept.push(leaf);
-      continue;
-    }
+  for (const repoDir of repoDirs) {
+    let leaves: string[] = [];
     try {
-      fs.rmSync(leaf, { recursive: true, force: true });
-      result.removed.push(leaf);
-    } catch (err) {
-      result.errors.push(
-        `Failed to delete ${leaf}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      leaves = fs
+        .readdirSync(repoDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => path.join(repoDir, d.name));
+    } catch {
+      continue;
     }
-  }
 
-  try {
-    for (const repo of fs.readdirSync(taskRoot, { withFileTypes: true })) {
-      if (!repo.isDirectory()) continue;
-      const repoDir = path.join(taskRoot, repo.name);
+    for (const leaf of leaves) {
+      result.scanned += 1;
+      const resolved = path.resolve(leaf);
+      if (!isDisposableTaskWorkspacePath(resolved, managedRoot)) {
+        result.failed += 1;
+        result.details.push(`skipped unexpected path ${leaf}`);
+        continue;
+      }
+      if (keep.has(resolved)) continue;
+
+      let mtimeMs = 0;
       try {
-        if (fs.readdirSync(repoDir).length === 0) fs.rmdirSync(repoDir);
+        mtimeMs = fs.statSync(leaf).mtimeMs;
       } catch {
-        // leave non-empty or busy directories
+        continue;
+      }
+      if (maxAgeMs > 0 && nowMs - mtimeMs < maxAgeMs) continue;
+
+      try {
+        result.bytesFreedEstimate += estimateDirSizeBytes(leaf, 2000);
+        fs.rmSync(leaf, { recursive: true, force: true });
+        result.removed += 1;
+        result.details.push(`removed ${leaf}`);
+      } catch (err) {
+        result.failed += 1;
+        result.details.push(
+          `failed ${leaf}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
-  } catch {
-    // ignore
+
+    try {
+      if (fs.readdirSync(repoDir).length === 0) {
+        fs.rmdirSync(repoDir);
+      }
+    } catch {
+      // ignore
+    }
   }
 
+  const git = input.runGit ?? runGit;
   await pruneRegisteredWorktrees(managedRoot, git);
   return result;
 }
 
-export function formatTaskWorktreePruneLog(result: PruneStaleTaskWorktreesResult): string | null {
-  if (result.removed.length === 0 && result.errors.length === 0) return null;
-  const parts: string[] = [];
-  if (result.removed.length > 0) {
-    parts.push(`pruned ${result.removed.length} leftover task worktree(s)`);
+/** Bounded walk so prune stays fast even when a leaf is multi-GB. */
+function estimateDirSizeBytes(dir: string, maxEntries: number): number {
+  let total = 0;
+  let seen = 0;
+  const stack = [dir];
+  while (stack.length > 0 && seen < maxEntries) {
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (seen >= maxEntries) break;
+      seen += 1;
+      const full = path.join(current, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          stack.push(full);
+        } else if (entry.isFile()) {
+          total += fs.statSync(full).size;
+        }
+      } catch {
+        // ignore
+      }
+    }
   }
-  if (result.errors.length > 0) {
-    parts.push(`${result.errors.length} error(s): ${result.errors[0]}`);
+  return total;
+}
+
+/** Default: drop task worktrees idle longer than 2 hours. */
+export const DEFAULT_TASK_WORKTREE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+export function parseTaskWorktreeMaxAgeMs(
+  raw: string | undefined,
+  fallback: number = DEFAULT_TASK_WORKTREE_MAX_AGE_MS,
+): number {
+  if (raw == null || !raw.trim()) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
+}
+
+export function formatTaskWorktreePruneLog(result: PruneStaleTaskWorktreesResult): string | null {
+  if (result.removed === 0 && result.failed === 0) return null;
+  const parts: string[] = [];
+  if (result.removed > 0) {
+    parts.push(`pruned ${result.removed} leftover task worktree(s)`);
+  }
+  if (result.failed > 0) {
+    parts.push(`${result.failed} error(s): ${result.details.find((d) => d.startsWith("failed") || d.startsWith("skipped")) ?? "see details"}`);
   }
   return parts.join("; ");
 }
