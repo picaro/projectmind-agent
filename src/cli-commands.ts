@@ -400,7 +400,31 @@ export async function runLoginCommand(envPath: string, args: string[] = []): Pro
   return result.success ? 0 : 1;
 }
 
-export type CliCommand = "setup" | "login" | "doctor" | "test" | "runners" | "help" | "version";
+export async function runPruneWorktreesCommand(): Promise<number> {
+  const { resolveManagedRoot } = await import("./managed-workspace.js");
+  const { formatTaskWorktreePruneLog, pruneStaleTaskWorktrees } = await import(
+    "./task-worktree.js"
+  );
+  const managedRoot = resolveManagedRoot();
+  console.log(`Pruning leftover task worktrees under ${managedRoot}…`);
+  const result = await pruneStaleTaskWorktrees({ managedRoot });
+  const log = formatTaskWorktreePruneLog(result);
+  if (log) console.log(log);
+  else console.log("No leftover task worktrees.");
+  for (const err of result.errors) console.error(err);
+  return result.errors.length > 0 ? 1 : 0;
+}
+
+export type CliCommand =
+  | "setup"
+  | "login"
+  | "doctor"
+  | "test"
+  | "runners"
+  | "prune-worktrees"
+  | "exec-job"
+  | "help"
+  | "version";
 
 export function parseCliCommand(args: string[]): { command: CliCommand | null; args: string[] } {
   if (args.length === 0) {
@@ -409,7 +433,19 @@ export function parseCliCommand(args: string[]): { command: CliCommand | null; a
   
   const first = args[0].toLowerCase();
   
-  if (["setup", "login", "doctor", "test", "runners", "help", "version"].includes(first)) {
+  if (
+    [
+      "setup",
+      "login",
+      "doctor",
+      "test",
+      "runners",
+      "prune-worktrees",
+      "exec-job",
+      "help",
+      "version",
+    ].includes(first)
+  ) {
     return { command: first as CliCommand, args: args.slice(1) };
   }
   
@@ -423,13 +459,15 @@ ProjectMind Agent v${version}
 Usage: projectmind-agent [command]
 
 Commands:
-  login       Browser pairing — mint API key without pasting
-  setup       Run interactive setup wizard
-  doctor      Run diagnostics and check configuration
-  test        Test all configured runners
-  runners     List available runners
-  help        Show this help message
-  version     Show version information
+  login            Browser pairing — mint API key without pasting
+  setup            Run interactive setup wizard
+  doctor           Run diagnostics and check configuration
+  test             Test all configured runners
+  runners          List available runners
+  prune-worktrees  Delete leftover isolated task worktrees
+  exec-job         Claim and run one child job then exit (used by the parent agent)
+  help             Show this help message
+  version          Show version information
   
   (no command)  Start the agent (heartbeat and job polling)
 
@@ -437,8 +475,10 @@ Examples:
   projectmind-agent              # Start the agent
   projectmind-agent login        # Connect with browser (recommended)
   projectmind-agent setup        # Configure allowlist / runners
-  projectmind-agent doctor       # Check for issues
-  projectmind-agent test         # Test all runners
+  projectmind-agent doctor            # Check for issues
+  projectmind-agent prune-worktrees   # Free disk from leftover task checkouts
+  projectmind-agent exec-job --jobId <uuid>
+  projectmind-agent test              # Test all runners
 
 For more information: https://github.com/projectmind/projectmind-agent
 `);

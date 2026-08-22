@@ -1,5 +1,6 @@
 import { runCliProcess, tryParseJsonLine } from "./cli-process.js";
 import type { Runner, RunnerResult } from "./types.js";
+import { appendCliMcpArgs } from "../projectmind-mcp.js";
 
 function summarizeCursorCliEvent(obj: Record<string, unknown>): string | null {
   const type = typeof obj.type === "string" ? obj.type : "event";
@@ -209,7 +210,7 @@ export function createCursorCliRunner(options: {
 
   return {
     name: "cursor_cli",
-    async run({ cwd, prompt, onLog, signal }): Promise<RunnerResult> {
+    async run({ cwd, prompt, onLog, signal, mcp }): Promise<RunnerResult> {
       let model = resolveCursorCliModelFlag(configuredModel);
       if (model && model !== configuredModel) {
         await onLog(
@@ -237,7 +238,8 @@ export function createCursorCliRunner(options: {
         if (options.extraArgs?.length) {
           args.push(...options.extraArgs);
         }
-        args.push(prompt);
+        const spawnArgs = appendCliMcpArgs(args, mcp);
+        spawnArgs.push(prompt);
 
         await onLog(
           `Starting Cursor CLI (${command}) in ${cwd}` + (model ? ` model=${model}` : ""),
@@ -246,7 +248,7 @@ export function createCursorCliRunner(options: {
 
         return runCliProcess({
           command,
-          args,
+          args: spawnArgs,
           cwd,
           env: options.apiKey?.trim() ? { CURSOR_API_KEY: options.apiKey.trim() } : undefined,
           signal,

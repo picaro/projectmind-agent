@@ -194,4 +194,34 @@ echo '{"type":"result","result":"ok after remap"}'
     expect(result.model).toBe("claude-4.5-sonnet");
     expect(logs.some((m) => /retrying with claude-4\.5-sonnet/.test(m))).toBe(true);
   });
+
+  it("passes --mcp-config when ProjectMind MCP is provided", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-fake-cursor-"));
+    const command = path.join(dir, "agent");
+    fs.writeFileSync(
+      command,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--mcp-config" ]; then
+    echo '{"type":"result","result":"ok"}'
+    exit 0
+  fi
+done
+echo "missing mcp-config" >&2
+exit 2
+`,
+      { mode: 0o755 },
+    );
+
+    const runner = createCursorCliRunner({ command, model: "default" });
+    const result = await runner.run({
+      cwd: dir,
+      prompt: "do the thing",
+      onLog: () => {},
+      signal: new AbortController().signal,
+      mcp: { url: "http://localhost:8080/api/mcp", apiKey: "imk_test" },
+    });
+
+    expect(result.status).toBe("succeeded");
+  });
 });

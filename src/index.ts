@@ -9,13 +9,17 @@ import {
   sleep,
 } from "./machine.js";
 import { connectMcpClient, callToolJson } from "./mcp-client.js";
-import { claimNextJob, executeClaimedJob, hasAnyAvailableRunner } from "./jobs.js";
+import { claimNextJob, claimSpecificJob, executeClaimedJob, hasAnyAvailableRunner } from "./jobs.js";
 import { syncGlobalCooldowns } from "./provider-pacing.js";
 import { getClaudeUsageSnapshot } from "./claude-usage.js";
 import { readLlmUsageMeta } from "./llm-stats.js";
 import { parseAllowlist } from "./safety.js";
 import { runHealthCheck } from "./health-check.js";
 import { resolveManagedRoot } from "./managed-workspace.js";
+import {
+  formatTaskWorktreePruneLog,
+  pruneStaleTaskWorktrees,
+} from "./task-worktree.js";
 import { getAgentBuildDate, getAgentVersion } from "./agent-version.js";
 import {
   clearActiveJob,
@@ -36,10 +40,12 @@ import {
   runDoctorCommand,
   runTestCommand,
   runRunnersCommand,
+  runPruneWorktreesCommand,
   showHelp,
   showVersion,
 } from "./cli-commands.js";
 import { resolveAutoRunnerChainWithDiagnostics } from "./runners/resolve.js";
+import { parseExecJobArgs, stopAllChildWorkers } from "./child-jobs.js";
 
 const cwd = process.cwd();
 const execDir = dirname(process.execPath);
@@ -236,6 +242,11 @@ async function main(): Promise<void> {
     const exitCode = await runRunnersCommand();
     process.exit(exitCode);
   }
+
+  if (command === "prune-worktrees") {
+    const exitCode = await runPruneWorktreesCommand();
+    process.exit(exitCode);
+  }
   
   // Check if setup wizard should run (only when starting agent normally)
   if (!command) {
@@ -279,6 +290,56 @@ async function main(): Promise<void> {
     process.env.IMEMORY_MCP_URL?.trim() || DEFAULT_MCP_URL,
     process.env.IMEMORY_PROJECT_SLUG?.trim() || process.env.MCP_PROJECT_SLUG?.trim(),
   );
+
+  if (command === "exec-job") {
+    const parsed = parseExecJobArgs(args);
+    if ("error" in parsed) {
+      console.error(parsed.error);
+      process.exit(1);
+    }
+    const info = collectMachineInfo();
+    console.log(`exec-job ${parsed.jobId} as ${info.agentKey}`);
+    const client = await connectMcpClient(mcpUrl, apiKey);
+    const shutdownExec = async (signal: string) => {
+      console.log(`exec-job shutting down (${signal})`);
+      await stopAllChildWorkers();
+      await client.close().catch(() => {});
+      process.exit(1);
+    };
+    process.on("SIGINT", () => {
+      void shutdownExec("SIGINT");
+    });
+    process.on("SIGTERM", () => {
+      void shutdownExec("SIGTERM");
+    });
+    try {
+      const claimed = await claimSpecificJob(client, info.agentKey, parsed.jobId);
+      if (!claimed) {
+        console.error("claimAgentJob returned no job");
+        process.exit(1);
+      }
+      await executeClaimedJob(
+        client,
+        claimed.job,
+        info.agentKey,
+        claimed.taskWorkspace,
+        claimed.repository,
+        claimed.managedWorkspace,
+        claimed.gitCredentials,
+        claimed.modelGateway,
+        {
+          delegation: claimed.delegation,
+          mcp: { url: mcpUrl.href, apiKey },
+        },
+      );
+    } catch (err) {
+      console.error("exec-job failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    } finally {
+      await client.close().catch(() => {});
+    }
+    return;
+  }
   const heartbeatMs = parseIntervalMs(
     process.env.IMEMORY_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_MS,
@@ -365,6 +426,7 @@ async function main(): Promise<void> {
       }
       clearActiveJob(active.jobId);
     }
+    await stopAllChildWorkers();
     await client.close().catch(() => {});
     process.exit(0);
   };
@@ -396,6 +458,17 @@ async function main(): Promise<void> {
     await maybeRunHealthCheck(client, agentMeta, info.agentKey, runState);
   } catch (err) {
     console.error("Initial heartbeat failed:", err instanceof Error ? err.message : err);
+  }
+
+  try {
+    const pruned = await pruneStaleTaskWorktrees({ managedRoot: resolveManagedRoot() });
+    const pruneLog = formatTaskWorktreePruneLog(pruned);
+    if (pruneLog) console.log(`Task worktrees: ${pruneLog}`);
+  } catch (err) {
+    console.error(
+      "Task worktree prune failed:",
+      err instanceof Error ? err.message : err,
+    );
   }
 
   let pollCount = 0;
@@ -462,6 +535,10 @@ async function main(): Promise<void> {
                 managedWorkspace,
                 gitCredentials,
                 modelGateway,
+                {
+                  delegation: claimed.delegation,
+                  mcp: { url: mcpUrl.href, apiKey },
+                },
               );
               console.log(`Job ${job.id} finished OK.`);
             } catch (err) {

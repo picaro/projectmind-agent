@@ -31,7 +31,15 @@ import {
   type WorkspaceMode,
 } from "./workspace-manager.js";
 import { restoreWorkspaceDefaultBranch, assertPathInsideManagedRoot, resolveManagedRoot } from "./managed-workspace.js";
-import { ensureTaskWorktree, shouldEnsureTaskWorktree } from "./task-worktree.js";
+import {
+  ensureTaskWorktree,
+  formatTaskWorktreePruneLog,
+  isDisposableTaskWorkspacePath,
+  pruneStaleTaskWorktrees,
+  removeTaskWorktree,
+  shouldEnsureTaskWorktree,
+  TASK_WORKSPACE_DIR_NAME,
+} from "./task-worktree.js";
 import { prepareEnvironment } from "./environment-manager.js";
 import { errorCodeForPhase, reportPhase, type ExecutionLifecyclePhase } from "./execution-phase.js";
 import {
@@ -52,6 +60,7 @@ import {
   readGitMeta,
 } from "./visual-capture.js";
 import { getAgentVersion } from "./agent-version.js";
+import { startChildJobWatch } from "./child-job-watch.js";
 import {
   LEASE_RENEW_MS,
   clearActiveJob,
@@ -88,6 +97,8 @@ export type ClaimedJobPayload = {
     branchName: string;
     baseBranch: string;
     status: string;
+    mustMaterialize?: boolean;
+    recreateIfMissing?: boolean;
   } | null;
   /** Repo identity for the project, when it has one. */
   repository?: {
@@ -137,6 +148,13 @@ export type ClaimedJobPayload = {
    */
   modelGateway?: ExecutionModelGateway | null;
   cooldowns?: Array<{ runner: string; cooldown_until: string | null }>;
+  delegation?: {
+    allowed?: boolean;
+    parentExecutionId?: string;
+    agentKey?: string;
+    maxConcurrentChildren?: number;
+    epicAllowsSubagents?: boolean;
+  } | null;
 };
 
 const CONSOLE_LOG_CHARS = 4_000;
@@ -193,10 +211,7 @@ export async function assertCwdMatchesJobProject(
   }
 }
 
-export async function claimNextJob(
-  client: Client,
-  agentKey: string,
-): Promise<{
+export type ClaimedJobBundle = {
   job: ClaimedJob;
   taskWorkspace: ClaimedJobPayload["taskWorkspace"];
   repository: ClaimedJobPayload["repository"];
@@ -204,12 +219,10 @@ export async function claimNextJob(
   gitCredentials: ClaimedJobPayload["gitCredentials"];
   modelGateway: ClaimedJobPayload["modelGateway"];
   cooldowns?: ClaimedJobPayload["cooldowns"];
-} | null> {
-  const payload = await callToolJson<ClaimedJobPayload>(client, "claimNextAgentJob", {
-    agentKey,
-  });
-  // Always sync cooldowns from the server, even when no job is returned.
-  // This lets the polling loop know which runners are in cooldown before claiming.
+  delegation?: ClaimedJobPayload["delegation"];
+};
+
+function hydrateClaimedJob(payload: ClaimedJobPayload): ClaimedJobBundle | null {
   if (payload.cooldowns) {
     syncGlobalCooldowns(payload.cooldowns);
   }
@@ -222,7 +235,32 @@ export async function claimNextJob(
     gitCredentials: payload.gitCredentials ?? null,
     modelGateway: payload.modelGateway ?? null,
     cooldowns: payload.cooldowns,
+    delegation: payload.delegation ?? null,
   };
+}
+
+export async function claimNextJob(
+  client: Client,
+  agentKey: string,
+): Promise<ClaimedJobBundle | null> {
+  const payload = await callToolJson<ClaimedJobPayload>(client, "claimNextAgentJob", {
+    agentKey,
+  });
+  // Always sync cooldowns from the server, even when no job is returned.
+  // This lets the polling loop know which runners are in cooldown before claiming.
+  return hydrateClaimedJob(payload);
+}
+
+export async function claimSpecificJob(
+  client: Client,
+  agentKey: string,
+  jobId: string,
+): Promise<ClaimedJobBundle | null> {
+  const payload = await callToolJson<ClaimedJobPayload>(client, "claimAgentJob", {
+    agentKey,
+    jobId,
+  });
+  return hydrateClaimedJob(payload);
 }
 
 /**
@@ -333,6 +371,11 @@ function logLocal(jobId: string, message: string, level: "info" | "error" = "inf
   else console.log(line);
 }
 
+export type ExecuteClaimedJobExtras = {
+  delegation?: ClaimedJobPayload["delegation"];
+  mcp?: { url: string; apiKey: string } | null;
+};
+
 export async function executeClaimedJob(
   client: Client,
   job: ClaimedJob & { cooldowns?: ClaimedJobPayload["cooldowns"] },
@@ -342,6 +385,7 @@ export async function executeClaimedJob(
   managedWorkspace?: ClaimedJobPayload["managedWorkspace"],
   gitCredentials?: ClaimedJobPayload["gitCredentials"],
   modelGateway?: ClaimedJobPayload["modelGateway"],
+  extras?: ExecuteClaimedJobExtras,
 ): Promise<void> {
   const startedAt = Date.now();
   setActiveJob(job.id, agentKey);
@@ -373,6 +417,21 @@ export async function executeClaimedJob(
   let consecutiveRenewFailures = 0;
   let renewTimer: ReturnType<typeof setInterval> | null = null;
   let cancelPoll: ReturnType<typeof setInterval> | null = null;
+  const runnerMcp =
+    extras?.delegation?.allowed && extras.mcp?.url && extras.mcp.apiKey ? extras.mcp : null;
+  let childWatch: { stop: () => Promise<void> } | null = null;
+  if (extras?.delegation?.allowed) {
+    childWatch = startChildJobWatch({
+      client,
+      parentJobId: job.id,
+      maxConcurrent: extras.delegation.maxConcurrentChildren,
+      onLog: (message) => {
+        logLocal(job.id, message);
+        void appendLog(client, job.id, agentKey, message, "status");
+      },
+      signal: abort.signal,
+    });
+  }
   // Set after a successful prepare so finally can return the base checkout to
   // the default branch even when the job exits early (plan await, failure, …).
   let hygiene: {
@@ -516,7 +575,35 @@ export async function executeClaimedJob(
     //
     // This must happen before the worktree step (which needs a git repo) and
     // before assertSafeWorkspace (which needs the directory to exist).
-    const workspaceTarget = managedWorkspace?.localPath || job.local_directory;
+    // Never clone into a `.pm-task-workspaces` leaf — that path is a worktree
+    // off the managed base, not a standalone clone target.
+    const managedRootEarly = resolveManagedRoot();
+    const jobDirIsTaskLeaf =
+      Boolean(job.local_directory?.trim()) &&
+      (job.local_directory.includes(TASK_WORKSPACE_DIR_NAME) ||
+        (managedRootEarly
+          ? isDisposableTaskWorkspacePath(job.local_directory, managedRootEarly)
+          : false));
+    const workspaceTarget =
+      managedWorkspace?.localPath ||
+      taskWorkspace?.baseLocalPath ||
+      (jobDirIsTaskLeaf ? null : job.local_directory);
+    if (jobDirIsTaskLeaf && !taskWorkspace) {
+      const reason =
+        `Task worktree cwd is missing claim prep (taskWorkspace): ${job.local_directory}. ` +
+        `Cannot provision without baseLocalPath/branchName from the control plane.`;
+      logLocal(job.id, `Workspace preparation failed: ${reason}`, "error");
+      await appendLog(client, job.id, agentKey, `Workspace preparation failed: ${reason}`, "error");
+      await callToolJson(client, "completeAgentJob", {
+        jobId: job.id,
+        agentKey,
+        status: "failed",
+        error: reason,
+        errorCode: errorCodeForPhase(currentPhase),
+        updateTask: false,
+      });
+      return;
+    }
     if (workspaceTarget) {
       await gotoPhase("preparing_workspace");
 
@@ -623,8 +710,40 @@ export async function executeClaimedJob(
 
     // Rematerialize when the allocated path is gone (ready/retained after cleanup
     // or a wiped host) — not only for first-time pending/leased prep.
+    // Free leftover worktrees from earlier jobs first so `git worktree add`
+    // is not the thing that hits ENOSPC on a small Mac Mini disk.
+    const managedRootForTasks = resolveManagedRoot();
+    try {
+      const keepPaths = [taskWorkspace?.localPath, job.local_directory].filter(
+        (p): p is string => Boolean(p?.trim()),
+      );
+      const pruned = await pruneStaleTaskWorktrees({
+        managedRoot: managedRootForTasks,
+        keepPaths,
+      });
+      const pruneLog = formatTaskWorktreePruneLog(pruned);
+      if (pruneLog) {
+        logLocal(job.id, `Task worktree ${pruneLog}`);
+        await appendLog(client, job.id, agentKey, `Task worktree ${pruneLog}`, "log");
+      }
+    } catch (err) {
+      logLocal(
+        job.id,
+        `Task worktree prune skipped: ${err instanceof Error ? err.message : err}`,
+        "error",
+      );
+    }
+
     if (taskWorkspace && shouldEnsureTaskWorktree(taskWorkspace)) {
-      const ensured = await ensureTaskWorktree(taskWorkspace);
+      let ensured = await ensureTaskWorktree(taskWorkspace);
+      if (
+        !ensured.ok &&
+        /no space left on device/i.test(ensured.reason)
+      ) {
+        logLocal(job.id, "Task worktree add hit ENOSPC — pruning leftovers and retrying");
+        await pruneStaleTaskWorktrees({ managedRoot: managedRootForTasks, keepPaths: [] });
+        ensured = await ensureTaskWorktree(taskWorkspace);
+      }
       if (!ensured.ok) {
         logLocal(job.id, `Task worktree failed: ${ensured.reason}`, "error");
         await appendLog(
@@ -918,6 +1037,7 @@ export async function executeClaimedJob(
           prompt,
           signal: abort.signal,
           timeoutMs: job.timeoutMs,
+          mcp: runnerMcp,
           onLog: async (message, kind = "log") => {
             logLocal(job.id, `[${kind}] ${message}`);
             try {
@@ -1358,7 +1478,37 @@ export async function executeClaimedJob(
         );
       }
     }
+    // Isolated task worktrees are disposable. The control plane cannot delete
+    // files on this Mac, so leftover `.pm-task-workspaces` dirs used to grow
+    // until the disk filled. Always remove after the job, including failures.
+    if (taskWorkspace) {
+      try {
+        const removed = await removeTaskWorktree(taskWorkspace);
+        if (!removed.ok) {
+          logLocal(job.id, `Task worktree cleanup skipped: ${removed.reason}`, "error");
+        } else if (removed.removed) {
+          logLocal(job.id, `Task worktree cleanup: ${removed.detail}`);
+        }
+      } catch (err) {
+        logLocal(
+          job.id,
+          `Task worktree cleanup threw: ${err instanceof Error ? err.message : err}`,
+          "error",
+        );
+      }
+    }
     stopLeaseKeepalive();
+    if (childWatch) {
+      try {
+        await childWatch.stop();
+      } catch (err) {
+        logLocal(
+          job.id,
+          `Child-job watch stop failed: ${err instanceof Error ? err.message : err}`,
+          "error",
+        );
+      }
+    }
     clearActiveJob(job.id);
     // Never let one job's credential outlive it into the next.
     setActiveGitCredentials(null);
