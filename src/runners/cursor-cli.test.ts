@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   createCursorCliRunner,
   formatCursorCliExitError,
+  installCursorWorkspaceMcpConfig,
   parseCursorCliModelRejection,
   pickClosestCursorCliModel,
   resolveCursorCliModelFlag,
@@ -196,7 +197,7 @@ echo '{"type":"result","result":"ok after remap"}'
     expect(logs.some((m) => /retrying with claude-4\.5-sonnet/.test(m))).toBe(true);
   });
 
-  it("passes --mcp-config when ProjectMind MCP is provided", async () => {
+  it("installs workspace .cursor/mcp.json instead of passing --mcp-config", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-fake-cursor-"));
     const command = path.join(dir, "agent");
     fs.writeFileSync(
@@ -204,12 +205,11 @@ echo '{"type":"result","result":"ok after remap"}'
       `#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "--mcp-config" ]; then
-    echo '{"type":"result","result":"ok"}'
-    exit 0
+    echo "error: unknown option '--mcp-config'" >&2
+    exit 1
   fi
 done
-echo "missing mcp-config" >&2
-exit 2
+echo '{"type":"result","result":"ok"}'
 `,
       { mode: 0o755 },
     );
@@ -224,6 +224,14 @@ exit 2
     });
 
     expect(result.status).toBe("succeeded");
+    const mcpPath = path.join(dir, ".cursor", "mcp.json");
+    expect(fs.existsSync(mcpPath)).toBe(true);
+    const mcpJson = JSON.parse(fs.readFileSync(mcpPath, "utf8"));
+    expect(mcpJson.mcpServers.projectmind).toEqual({
+      type: "http",
+      url: "http://localhost:8080/api/mcp",
+      headers: { Authorization: "Bearer imk_test" },
+    });
   });
 });
 
@@ -258,6 +266,27 @@ describe("sanitizeCursorCliExtraArgs", () => {
     expect(sanitized).toEqual([]);
     const targetMcp = path.join(wsDir, ".cursor", "mcp.json");
     expect(fs.existsSync(targetMcp)).toBe(true);
+  });
+});
+
+describe("installCursorWorkspaceMcpConfig", () => {
+  it("merges projectmind into an existing workspace mcp.json", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-mcp-merge-"));
+    const mcpPath = path.join(dir, ".cursor", "mcp.json");
+    fs.mkdirSync(path.dirname(mcpPath), { recursive: true });
+    fs.writeFileSync(
+      mcpPath,
+      JSON.stringify({ mcpServers: { local: { command: "echo" } } }),
+    );
+
+    installCursorWorkspaceMcpConfig(dir, {
+      url: "http://localhost:8080/api/mcp",
+      apiKey: "imk_test",
+    });
+
+    const merged = JSON.parse(fs.readFileSync(mcpPath, "utf8"));
+    expect(merged.mcpServers.local).toEqual({ command: "echo" });
+    expect(merged.mcpServers.projectmind.url).toBe("http://localhost:8080/api/mcp");
   });
 });
 
@@ -301,6 +330,7 @@ echo '{"type":"result","result":"mcp ok"}'
       prompt: "test mcp",
       onLog: () => {},
       signal: new AbortController().signal,
+      mcp: { url: "http://localhost:8080/api/mcp", apiKey: "imk_test" },
     });
 
     expect(result.status).toBe("succeeded");

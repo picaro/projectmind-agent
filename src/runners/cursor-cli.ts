@@ -2,7 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { runCliProcess, tryParseJsonLine } from "./cli-process.js";
 import type { Runner, RunnerResult } from "./types.js";
-import { appendCliMcpArgs } from "../projectmind-mcp.js";
+import {
+  buildCliMcpConfigFileContents,
+  type ProjectMindMcpConfig,
+} from "../projectmind-mcp.js";
 
 function summarizeCursorCliEvent(obj: Record<string, unknown>): string | null {
   const type = typeof obj.type === "string" ? obj.type : "event";
@@ -230,19 +233,60 @@ export function sanitizeCursorCliExtraArgs(
   return out;
 }
 
+function cursorWorkspaceMcpPath(cwd: string): string {
+  return path.join(cwd, ".cursor", "mcp.json");
+}
+
 function tryMirrorMcpConfigFile(sourcePath: string, cwd: string): void {
   try {
     if (fs.existsSync(sourcePath)) {
-      const dotCursor = path.join(cwd, ".cursor");
-      const targetFile = path.join(dotCursor, "mcp.json");
+      const targetFile = cursorWorkspaceMcpPath(cwd);
       if (!fs.existsSync(targetFile)) {
-        fs.mkdirSync(dotCursor, { recursive: true });
+        fs.mkdirSync(path.dirname(targetFile), { recursive: true });
         fs.copyFileSync(sourcePath, targetFile);
       }
     }
   } catch {
     // Best effort: never fail CLI invocation if copying MCP config throws
   }
+}
+
+/**
+ * Cursor CLI has no `--mcp-config` flag. Install ProjectMind MCP into the
+ * workspace file it actually reads: `<cwd>/.cursor/mcp.json`.
+ * Merges with any existing servers so project MCP entries are kept.
+ */
+export function installCursorWorkspaceMcpConfig(
+  cwd: string,
+  mcp: ProjectMindMcpConfig,
+): void {
+  const targetFile = cursorWorkspaceMcpPath(cwd);
+  const incoming = JSON.parse(buildCliMcpConfigFileContents(mcp)) as {
+    mcpServers?: Record<string, unknown>;
+  };
+  let existing: { mcpServers?: Record<string, unknown> } = {};
+  try {
+    if (fs.existsSync(targetFile)) {
+      const parsed = JSON.parse(fs.readFileSync(targetFile, "utf8"));
+      if (parsed && typeof parsed === "object") {
+        existing = parsed as { mcpServers?: Record<string, unknown> };
+      }
+    }
+  } catch {
+    existing = {};
+  }
+  const merged = {
+    ...existing,
+    mcpServers: {
+      ...(existing.mcpServers ?? {}),
+      ...(incoming.mcpServers ?? {}),
+    },
+  };
+  fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+  fs.writeFileSync(targetFile, JSON.stringify(merged, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 }
 
 export function createCursorCliRunner(options: {
@@ -292,8 +336,19 @@ export function createCursorCliRunner(options: {
         if (sanitizedExtraArgs.length) {
           args.push(...sanitizedExtraArgs);
         }
-        const spawnArgs = appendCliMcpArgs(args, mcp);
-        spawnArgs.push(prompt);
+        if (mcp?.url && mcp.apiKey) {
+          try {
+            installCursorWorkspaceMcpConfig(cwd, mcp);
+          } catch (err) {
+            await onLog(
+              `Failed to write workspace MCP config: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+              "error",
+            );
+          }
+        }
+        const spawnArgs = [...args, prompt];
 
         await onLog(
           `Starting Cursor CLI (${command}) in ${cwd}` + (model ? ` model=${model}` : ""),
