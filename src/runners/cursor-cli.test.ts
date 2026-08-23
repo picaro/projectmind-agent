@@ -8,6 +8,7 @@ import {
   parseCursorCliModelRejection,
   pickClosestCursorCliModel,
   resolveCursorCliModelFlag,
+  sanitizeCursorCliExtraArgs,
 } from "./cursor-cli.js";
 
 describe("resolveCursorCliModelFlag", () => {
@@ -195,3 +196,85 @@ echo '{"type":"result","result":"ok after remap"}'
     expect(logs.some((m) => /retrying with claude-4\.5-sonnet/.test(m))).toBe(true);
   });
 });
+
+describe("sanitizeCursorCliExtraArgs", () => {
+  it("strips --mcp-config <path> from extraArgs and copies to .cursor/mcp.json", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-mcp-test-"));
+    const srcMcp = path.join(dir, "source-mcp.json");
+    fs.writeFileSync(srcMcp, JSON.stringify({ mcpServers: { test: { command: "echo" } } }));
+
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-ws-test-"));
+    const sanitized = sanitizeCursorCliExtraArgs(
+      ["--verbose", "--mcp-config", srcMcp, "--other-flag"],
+      wsDir,
+    );
+
+    expect(sanitized).toEqual(["--verbose", "--other-flag"]);
+    const targetMcp = path.join(wsDir, ".cursor", "mcp.json");
+    expect(fs.existsSync(targetMcp)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(targetMcp, "utf8"))).toEqual({
+      mcpServers: { test: { command: "echo" } },
+    });
+  });
+
+  it("strips --mcp-config=<path> format as well", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-mcp-test-"));
+    const srcMcp = path.join(dir, "source-mcp.json");
+    fs.writeFileSync(srcMcp, JSON.stringify({ mcpServers: { test: { command: "echo" } } }));
+
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-ws-test-"));
+    const sanitized = sanitizeCursorCliExtraArgs([`--mcp-config=${srcMcp}`], wsDir);
+
+    expect(sanitized).toEqual([]);
+    const targetMcp = path.join(wsDir, ".cursor", "mcp.json");
+    expect(fs.existsSync(targetMcp)).toBe(true);
+  });
+});
+
+describe("createCursorCliRunner mcp handling", () => {
+  it("passes --approve-mcps and does not forward --mcp-config to agent CLI", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-fake-cursor-mcp-"));
+    const command = path.join(dir, "agent");
+    const srcMcp = path.join(dir, "temp-mcp.json");
+    fs.writeFileSync(srcMcp, '{"mcpServers":{}}');
+
+    fs.writeFileSync(
+      command,
+      `#!/bin/sh
+has_approve=0
+for arg in "$@"; do
+  if [ "$arg" = "--mcp-config" ]; then
+    echo "error: unknown option '--mcp-config'" >&2
+    exit 1
+  fi
+  if [ "$arg" = "--approve-mcps" ]; then
+    has_approve=1
+  fi
+done
+if [ "$has_approve" -ne 1 ]; then
+  echo "missing --approve-mcps" >&2
+  exit 2
+fi
+echo '{"type":"result","result":"mcp ok"}'
+`,
+      { mode: 0o755 },
+    );
+
+    const runner = createCursorCliRunner({
+      command,
+      model: "default",
+      extraArgs: ["--mcp-config", srcMcp],
+    });
+
+    const result = await runner.run({
+      cwd: dir,
+      prompt: "test mcp",
+      onLog: () => {},
+      signal: new AbortController().signal,
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.summary).toBe("mcp ok");
+  });
+});
+

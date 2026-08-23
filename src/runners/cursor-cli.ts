@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { runCliProcess, tryParseJsonLine } from "./cli-process.js";
 import type { Runner, RunnerResult } from "./types.js";
 
@@ -192,6 +194,56 @@ export function formatCursorCliExitError(code: number | null, output: string): s
   return `Cursor CLI exited with code ${code ?? "?"}` + (head ? `: ${head}` : "");
 }
 
+
+/**
+ * Cursor CLI discovers MCP servers from `<workspace>/.cursor/mcp.json` or `~/.cursor/mcp.json`.
+ * It does not support `--mcp-config <path>` on argv.
+ * If `--mcp-config` is provided in extraArgs, strip it from argv and ensure the config
+ * is mirrored to `<cwd>/.cursor/mcp.json` if possible.
+ */
+export function sanitizeCursorCliExtraArgs(
+  extraArgs: string[] | undefined,
+  cwd: string,
+): string[] {
+  if (!extraArgs || extraArgs.length === 0) return [];
+  const out: string[] = [];
+  for (let i = 0; i < extraArgs.length; i++) {
+    const arg = extraArgs[i]!;
+    if (arg === "--mcp-config") {
+      const next = extraArgs[i + 1];
+      if (next && !next.startsWith("-")) {
+        tryMirrorMcpConfigFile(next, cwd);
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--mcp-config=")) {
+      const filePath = arg.slice("--mcp-config=".length).trim();
+      if (filePath) {
+        tryMirrorMcpConfigFile(filePath, cwd);
+      }
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+function tryMirrorMcpConfigFile(sourcePath: string, cwd: string): void {
+  try {
+    if (fs.existsSync(sourcePath)) {
+      const dotCursor = path.join(cwd, ".cursor");
+      const targetFile = path.join(dotCursor, "mcp.json");
+      if (!fs.existsSync(targetFile)) {
+        fs.mkdirSync(dotCursor, { recursive: true });
+        fs.copyFileSync(sourcePath, targetFile);
+      }
+    }
+  } catch {
+    // Best effort: never fail CLI invocation if copying MCP config throws
+  }
+}
+
 export function createCursorCliRunner(options: {
   /** Binary name or path. Default: agent (Cursor Agent CLI). */
   command?: string;
@@ -225,6 +277,7 @@ export function createCursorCliRunner(options: {
           "-p",
           "--force",
           "--trust",
+          "--approve-mcps",
           "--workspace",
           cwd,
           "--output-format",
@@ -234,8 +287,9 @@ export function createCursorCliRunner(options: {
           args.push("--model", model);
         }
         // Prefer CURSOR_API_KEY in env — never put the key on argv (spawn logs / ps).
-        if (options.extraArgs?.length) {
-          args.push(...options.extraArgs);
+        const sanitizedExtraArgs = sanitizeCursorCliExtraArgs(options.extraArgs, cwd);
+        if (sanitizedExtraArgs.length) {
+          args.push(...sanitizedExtraArgs);
         }
         args.push(prompt);
 
