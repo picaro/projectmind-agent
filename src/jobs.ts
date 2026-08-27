@@ -321,15 +321,25 @@ async function appendLog(
   kind: "log" | "error" | "status" = "log",
   extras?: { markRunning?: boolean; externalRunId?: string; realLlm?: string | null },
 ): Promise<void> {
-  await callToolJson(client, "appendAgentJobEvent", {
-    jobId,
-    message: message.slice(0, 7500),
-    kind,
-    agentKey,
-    ...(extras?.markRunning ? { markRunning: true } : {}),
-    ...(extras?.externalRunId ? { externalRunId: extras.externalRunId } : {}),
-    ...(extras?.realLlm ? { realLlm: extras.realLlm } : {}),
-  });
+  try {
+    await callToolJson(client, "appendAgentJobEvent", {
+      jobId,
+      message: message.slice(0, 7500),
+      kind,
+      agentKey,
+      ...(extras?.markRunning ? { markRunning: true } : {}),
+      ...(extras?.externalRunId ? { externalRunId: extras.externalRunId } : {}),
+      ...(extras?.realLlm ? { realLlm: extras.realLlm } : {}),
+    });
+  } catch (err) {
+    // Logging must never crash the daemon — after completeAgentJob the lease is
+    // gone and appendAgentJobEvent returns "Job not accessible for this API key".
+    logLocal(
+      jobId,
+      `Failed to upload log event: ${err instanceof Error ? err.message : err}`,
+      "error",
+    );
+  }
 }
 
 function realLlmFromResult(runner: string | null, model?: string | null): string | undefined {
@@ -1509,6 +1519,7 @@ export async function executeClaimedJob(
         );
       }
     }
+    abort.abort();
     stopLeaseKeepalive();
     if (childWatch) {
       try {

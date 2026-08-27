@@ -461,6 +461,12 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => {
     void shutdown("SIGTERM");
   });
+  process.on("unhandledRejection", (reason) => {
+    console.error(
+      "Unhandled rejection (continuing):",
+      reason instanceof Error ? reason.stack ?? reason.message : reason,
+    );
+  });
 
   // Heartbeat on its own timer so long-running jobs still mark the agent online.
   heartbeatTimer = setInterval(() => {
