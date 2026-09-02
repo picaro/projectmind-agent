@@ -135,4 +135,40 @@ echo '{"type":"result","is_error":false,"result":"All done"}'
     expect(result.status).toBe("succeeded");
     expect(result.stats).toBeUndefined();
   });
+
+  it("separates the prompt from a preceding variadic flag with `--`", async () => {
+    // Commander-style parsers (e.g. Claude CLI's `--mcp-config <configs...>`) treat
+    // variadic options as greedy: a bare trailing positional gets swallowed into the
+    // option's value list unless a `--` separator stops option parsing first. Guard
+    // against the prompt being consumed as an extra --mcp-config value.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-fake-claude-"));
+    const command = path.join(dir, "claude");
+    const argvFile = path.join(dir, "argv.txt");
+    fs.writeFileSync(
+      command,
+      `#!/bin/sh
+for arg in "$@"; do printf '%s\\n' "$arg" >> "${argvFile}"; done
+echo '{"type":"result","is_error":false,"result":"All done"}'
+`,
+      { mode: 0o755 },
+    );
+
+    const runner = createClaudeCliRunner({ command });
+    const result = await runner.run({
+      cwd: process.cwd(),
+      prompt: "the actual prompt text",
+      onLog: () => {},
+      signal: new AbortController().signal,
+      mcp: { url: "https://example.test/mcp", apiKey: "secret" },
+    });
+
+    expect(result.status).toBe("succeeded");
+    const argv = fs.readFileSync(argvFile, "utf8").trim().split("\n");
+    const mcpConfigIndex = argv.indexOf("--mcp-config");
+    expect(mcpConfigIndex).toBeGreaterThanOrEqual(0);
+    // Exactly one value belongs to --mcp-config: the config path, then `--`, then the prompt.
+    expect(argv[mcpConfigIndex + 2]).toBe("--");
+    expect(argv[mcpConfigIndex + 3]).toBe("the actual prompt text");
+    expect(argv.at(-1)).toBe("the actual prompt text");
+  });
 });

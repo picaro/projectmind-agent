@@ -153,7 +153,11 @@ export function createClaudeCliRunner(options: {
         args.push(...options.extraArgs);
       }
       const spawnArgs = appendCliMcpArgs(args, mcp);
-      spawnArgs.push(prompt);
+      // `--mcp-config <configs...>` (and other options) are variadic in the Claude
+      // CLI's arg parser: without a `--` separator it greedily swallows the trailing
+      // prompt positional as another config value, then tries to open() the whole
+      // prompt as a file path (ENAMETOOLONG on anything past a few hundred chars).
+      spawnArgs.push("--", prompt);
 
       await onLog(
         `Starting Claude CLI (${command}) in ${cwd}` +
