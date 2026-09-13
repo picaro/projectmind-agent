@@ -1,12 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RunnerLog } from "./runners/types.js";
-import { gitEnvWithCredentials } from "./managed-workspace.js";
+import { gitEnvWithCredentials, SENSITIVE_PATH } from "./managed-workspace.js";
 
 const execFileAsync = promisify(execFile);
-
-const SECRET_PATH =
-  /(^|\/)(\.env(\..+)?|.*credentials.*|.*secret.*|.*\.pem|.*\.p12|id_rsa|id_ed25519)(\.local)?$/i;
 
 const MAX_MESSAGE_CHARS = 72;
 
@@ -194,7 +191,7 @@ export async function commitAndPushAfterTask(
     };
   }
 
-  const secrets = stagedFiles.filter((f) => SECRET_PATH.test(f));
+  const secrets = stagedFiles.filter((f) => SENSITIVE_PATH.test(f));
   if (secrets.length > 0) {
     const err = `Refusing to commit sensitive paths: ${secrets.slice(0, 5).join(", ")}`;
     await onLog(err, "error");

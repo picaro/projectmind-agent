@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import {
   assertPathInsideManagedRoot,
   ensureManagedArchiveWorkspace,
   ensureManagedClone,
+  adoptExistingFolder,
   ensureManagedEmptyWorkspace,
   ensureUserWorkspace,
   resolveArchiveEntryPath,
@@ -196,6 +198,96 @@ describe("ensureManagedEmptyWorkspace", () => {
 
     expect(result).toEqual({ ok: true, created: true, headSha: null });
     expect(calls).toEqual([["init"]]);
+  });
+});
+
+describe("adoptExistingFolder (real git)", () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+  it("puts existing source under git with one baseline commit, touching no files", async () => {
+    const target = path.join(tmpRoot, "client-app");
+    fs.mkdirSync(path.join(target, "src"), { recursive: true });
+    fs.writeFileSync(path.join(target, "src", "index.ts"), "export const x = 1;\n");
+    fs.writeFileSync(path.join(target, "README.md"), "client\n");
+    fs.mkdirSync(path.join(target, "node_modules", "dep"), { recursive: true });
+    fs.writeFileSync(path.join(target, "node_modules", "dep", "i.js"), "x");
+
+    const logs: string[] = [];
+    const result = await ensureManagedEmptyWorkspace({
+      localPath: target,
+      adoptExistingFiles: true,
+      onLog: (l) => logs.push(l),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.created).toBe(true);
+    expect(result.headSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(git(target, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
+    expect(git(target, "log", "--format=%s")).toBe("ProjectMind baseline (existing folder adopted)");
+    expect(git(target, "ls-files").split("\n").sort()).toEqual([".gitignore", "README.md", "src/index.ts"]);
+    expect(git(target, "status", "--porcelain")).toBe("");
+    expect(fs.readFileSync(path.join(target, "src", "index.ts"), "utf8")).toBe("export const x = 1;\n");
+    expect(logs.some((l) => l.includes("Adopted existing folder"))).toBe(true);
+  });
+
+  it("keeps an existing .gitignore and never commits secrets", async () => {
+    const target = path.join(tmpRoot, "with-secrets");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, ".gitignore"), "# theirs\n");
+    fs.writeFileSync(path.join(target, "app.py"), "print(1)\n");
+    fs.writeFileSync(path.join(target, ".env"), "TOKEN=abc\n");
+    fs.writeFileSync(path.join(target, "server.pem"), "key\n");
+
+    const result = await adoptExistingFolder({ localPath: target });
+
+    expect(result.ok).toBe(true);
+    expect(fs.readFileSync(path.join(target, ".gitignore"), "utf8")).toBe("# theirs\n");
+    expect(git(target, "ls-files").split("\n").sort()).toEqual([".gitignore", "app.py"]);
+    expect(fs.existsSync(path.join(target, ".env"))).toBe(true);
+  });
+
+  it("is a no-op reuse on the next prepare — no second baseline", async () => {
+    const target = path.join(tmpRoot, "second-run");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "a.txt"), "a\n");
+
+    const first = await ensureManagedEmptyWorkspace({ localPath: target, adoptExistingFiles: true });
+    const second = await ensureManagedEmptyWorkspace({ localPath: target, adoptExistingFiles: true });
+
+    expect(first.ok && second.ok).toBe(true);
+    if (first.ok && second.ok) {
+      expect(second.created).toBe(false);
+      expect(second.headSha).toBe(first.headSha);
+    }
+    expect(git(target, "rev-list", "--count", "HEAD")).toBe("1");
+  });
+
+  it("refuses the home directory", async () => {
+    const result = await adoptExistingFolder({ localPath: os.homedir() });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/refusing/);
+  });
+
+  it("removes only what it created when the commit fails", async () => {
+    const target = path.join(tmpRoot, "commit-fails");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "a.txt"), "a\n");
+    const runGit: RunGit = async (cwd, args) => {
+      if (args.includes("commit")) return { code: 1, stdout: "", stderr: "boom" };
+      if (args[0] === "init") fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+      if (args[0] === "diff") return { code: 0, stdout: "a.txt\n.gitignore\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+
+    const result = await adoptExistingFolder({ localPath: target, runGit });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/baseline commit failed: boom/);
+    expect(fs.existsSync(path.join(target, ".git"))).toBe(false);
+    expect(fs.existsSync(path.join(target, ".gitignore"))).toBe(false);
+    expect(fs.readFileSync(path.join(target, "a.txt"), "utf8")).toBe("a\n");
   });
 });
 

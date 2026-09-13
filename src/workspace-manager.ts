@@ -158,7 +158,13 @@ export async function prepareWorkspace(
         runGit: input.runGit,
       })
     : wantsEmpty
-      ? await ensureManagedEmptyWorkspace({ localPath, onLog, runGit: input.runGit })
+      ? await ensureManagedEmptyWorkspace({
+          localPath,
+          // A folder a person named may already hold their source code without git.
+          adoptExistingFiles: containment === "allowlisted",
+          onLog,
+          runGit: input.runGit,
+        })
       : // The containment split is the safety-critical line: only a directory the
         // agent owns may be force-matched to the remote on every prepare.
         await (containment === "managed" ? ensureManagedClone : ensureUserWorkspace)({
