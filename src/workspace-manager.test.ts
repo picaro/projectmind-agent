@@ -252,6 +252,51 @@ describe("prepareWorkspace modes", () => {
   });
 });
 
+describe("prepareWorkspace existing non-git folder", () => {
+  it("adopts a person-configured folder that already holds source code", async () => {
+    const target = path.join(allowRoot, "client-code");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "main.py"), "print(1)\n");
+    const { runGit, calls } = fakeGit((args) =>
+      args[0] === "diff" ? { code: 0, stdout: "main.py\n" } : { code: 0, stdout: "abc123\n" },
+    );
+
+    const result = await prepareWorkspace({
+      localPath: target,
+      containment: "allowlisted",
+      mode: "empty",
+      repository: null,
+      credentials: null,
+      runGit,
+    });
+
+    expect(result).toMatchObject({ ok: true, action: "initialized" });
+    expect(calls.map((c) => c[0])).toContain("init");
+    expect(calls.some((c) => c.includes("commit"))).toBe(true);
+    expect(calls.some((c) => c[0] === "clone" || c[0] === "fetch")).toBe(false);
+    expect(fs.readFileSync(path.join(target, "main.py"), "utf8")).toBe("print(1)\n");
+  });
+
+  it("still refuses a non-empty non-git folder the agent owns", async () => {
+    const target = path.join(managedRoot, "half-cloned");
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "junk"), "x");
+    const { runGit, calls } = fakeGit();
+
+    const result = await prepareWorkspace({
+      localPath: target,
+      containment: "managed",
+      mode: "empty",
+      repository: null,
+      credentials: null,
+      runGit,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("prepareWorkspace failure reporting", () => {
   it("returns a reason instead of throwing, so only the current job fails", async () => {
     const target = path.join(managedRoot, "broken");

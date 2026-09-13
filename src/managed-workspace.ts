@@ -212,6 +212,13 @@ function isEmptyDirectory(dir: string): boolean {
 
 export type EnsureManagedEmptyWorkspaceInput = {
   localPath: string;
+  /**
+   * A person pointed the agent at this folder, so existing non-git content is
+   * their source code, not debris from a failed preparation. Adopt it in place
+   * (git init + baseline commit) instead of refusing. Never set this for
+   * agent-owned paths.
+   */
+  adoptExistingFiles?: boolean;
   onLog?: (line: string) => void;
   runGit?: RunGit;
 };
@@ -224,7 +231,9 @@ export type EnsureManagedEmptyWorkspaceInput = {
  *                         of what the agent did here)
  *  - existing repo     -> leave it exactly as it is; there is no remote to reset to,
  *                         so resetting would destroy the only copy of prior work
- *  - existing non-repo -> fail loudly, same as the clone path
+ *  - existing non-repo -> adopt it in place when a person configured the folder
+ *                         (adoptExistingFiles); otherwise fail loudly, same as
+ *                         the clone path
  */
 export async function ensureManagedEmptyWorkspace(
   input: EnsureManagedEmptyWorkspaceInput,
@@ -241,6 +250,9 @@ export async function ensureManagedEmptyWorkspace(
       return { ok: true, created: false, headSha: head.code === 0 ? head.stdout.trim() : null };
     }
     if (!isEmptyDirectory(localPath)) {
+      if (input.adoptExistingFiles) {
+        return adoptExistingFolder({ localPath, onLog: input.onLog, runGit });
+      }
       return {
         ok: false,
         reason: `managed workspace exists but is not a git repository: ${localPath}. Remove it or point the agent elsewhere.`,
@@ -268,6 +280,132 @@ export async function ensureManagedEmptyWorkspace(
 
   // No HEAD yet — an initialized repo has no commits.
   return { ok: true, created: true, headSha: null };
+}
+
+/** Paths that must never land in a commit the agent authors. */
+export const SENSITIVE_PATH =
+  /(^|\/)(\.env(\..+)?|.*credentials.*|.*secret.*|.*\.pem|.*\.p12|id_rsa|id_ed25519)(\.local)?$/i;
+
+/** Written only when the folder has no .gitignore of its own. */
+export const ADOPTED_WORKSPACE_GITIGNORE = [
+  "# Added by ProjectMind agent when this folder was put under local git.",
+  "node_modules/",
+  "dist/",
+  "build/",
+  ".next/",
+  "coverage/",
+  "Library/",
+  "Temp/",
+  "Obj/",
+  ".DS_Store",
+  ".env",
+  ".env.*",
+  "",
+].join("\n");
+
+const BASELINE_COMMIT_MESSAGE = "ProjectMind baseline (existing folder adopted)";
+
+/**
+ * Put a person's existing, non-git source folder under local git without
+ * touching a single file of theirs: init, a default .gitignore only when there
+ * is none, and one baseline commit so branches, worktrees, checkpoints and
+ * diffs have something to start from. There is no remote — nothing is pushed.
+ *
+ * On failure, only what this function created (.git, the .gitignore it wrote)
+ * is removed, so the next attempt starts from the same state.
+ */
+export async function adoptExistingFolder(input: {
+  localPath: string;
+  onLog?: (line: string) => void;
+  runGit?: RunGit;
+}): Promise<EnsureManagedCloneResult> {
+  const runGit = input.runGit ?? runGitCommand;
+  const log = (line: string) => input.onLog?.(line);
+  const localPath = path.resolve(input.localPath);
+
+  if (localPath === path.parse(localPath).root || localPath === path.resolve(os.homedir())) {
+    return {
+      ok: false,
+      reason: `refusing to put ${localPath} under git — point the agent at the project folder itself.`,
+    };
+  }
+
+  const gitDir = path.join(localPath, ".git");
+  const gitignorePath = path.join(localPath, ".gitignore");
+  let wroteGitignore = false;
+  const undo = (reason: string): EnsureManagedCloneResult => {
+    fs.rmSync(gitDir, { recursive: true, force: true });
+    if (wroteGitignore) fs.rmSync(gitignorePath, { force: true });
+    return { ok: false, reason };
+  };
+
+  log(`Adopting existing folder ${localPath} as a local-only git workspace (no repository connected)`);
+
+  const init = await runGit(localPath, ["init"], null);
+  if (init.code !== 0) return undo(`git init failed: ${init.stderr}`);
+  // Pin the branch name regardless of the machine's init.defaultBranch.
+  await runGit(localPath, ["symbolic-ref", "HEAD", "refs/heads/main"], null);
+
+  if (!fs.existsSync(gitignorePath)) {
+    try {
+      fs.writeFileSync(gitignorePath, ADOPTED_WORKSPACE_GITIGNORE);
+      wroteGitignore = true;
+    } catch (err) {
+      return undo(
+        `cannot write .gitignore in ${localPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  const add = await runGit(localPath, ["add", "-A"], null);
+  if (add.code !== 0) return undo(`git add failed: ${add.stderr}`);
+
+  const staged = await runGit(localPath, ["diff", "--cached", "--name-only"], null);
+  if (staged.code !== 0) return undo(`git diff --cached failed: ${staged.stderr}`);
+  const stagedFiles = staged.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Secrets stay on disk, just untracked — the baseline must never capture them.
+  const sensitive = stagedFiles.filter((f) => SENSITIVE_PATH.test(f));
+  if (sensitive.length > 0) {
+    const unstage = await runGit(localPath, ["rm", "--cached", "-q", "--", ...sensitive], null);
+    if (unstage.code !== 0) return undo(`could not leave sensitive files untracked: ${unstage.stderr}`);
+    log(`Left ${sensitive.length} sensitive file(s) untracked (e.g. ${sensitive[0]})`);
+  }
+  if (stagedFiles.length === sensitive.length) {
+    log(`Nothing to commit in ${localPath} — initialized without a baseline commit`);
+    return { ok: true, created: true, headSha: null };
+  }
+
+  const commit = await runGit(
+    localPath,
+    [
+      "-c",
+      "user.name=ProjectMind Agent",
+      "-c",
+      "user.email=agent@projectmind.local",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "--no-verify",
+      "-q",
+      "-m",
+      BASELINE_COMMIT_MESSAGE,
+    ],
+    null,
+  );
+  if (commit.code !== 0) return undo(`baseline commit failed: ${commit.stderr || commit.stdout}`);
+
+  const head = await runGit(localPath, ["rev-parse", "HEAD"], null);
+  const headSha = head.code === 0 ? head.stdout.trim() : null;
+  log(
+    `Adopted existing folder as local-only git workspace (baseline ${headSha?.slice(0, 7) ?? "HEAD"}, ${
+      stagedFiles.length - sensitive.length
+    } files)`,
+  );
+  return { ok: true, created: true, headSha };
 }
 
 export type EnsureManagedArchiveWorkspaceInput = {
