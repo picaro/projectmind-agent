@@ -17,7 +17,7 @@
     "start": "tsx src/index.ts",
     "build": "node scripts/build-npm.mjs",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm test",
+    "prepublishOnly": "pnpm run build && pnpm test",
     "build:release": "node scripts/build-release.mjs"
   },
   "dependencies": {
@@ -44,5 +44,21 @@
   "pkg": {
     "assets": [],
     "outputPath": "dist-release/bin"
+  },
+  "packageManager": "pnpm@10.17.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "better-sqlite3",
+      "ffmpeg-static",
+      "unrs-resolver",
+      "sharp",
+      "@parcel/watcher",
+      "msgpackr-extract",
+      "protobufjs",
+      "core-js",
+      "supabase"
+    ]
   }
 }
