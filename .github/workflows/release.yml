@@ -13,11 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Verify tag matches package version
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
@@ -33,13 +38,18 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Build macOS release artifacts
-        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_ONLY=macos-arm64,macos-x64 npm run build:release
+        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_ONLY=macos-arm64,macos-x64 pnpm run build:release
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos
@@ -51,15 +61,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Build Linux and Windows release artifacts
-        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_ONLY=windows-x64,ubuntu-x64 npm run build:release
+        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_ONLY=windows-x64,ubuntu-x64 pnpm run build:release
       - name: Build Node.js release artifact
-        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_NODEJS_ONLY=1 npm run build:release
+        run: AGENT_RELEASE_OUT="$GITHUB_WORKSPACE/release" AGENT_RELEASE_NODEJS_ONLY=1 pnpm run build:release
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux
