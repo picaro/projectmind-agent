@@ -2,6 +2,7 @@ import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import {
   isRetryableRunnerFailure,
   resolveAutoRunnerChain,
+  resolveAutoRunnerChainWithDiagnostics,
   resolveRunnerAttempts,
   handleRunnerResult,
   resetRunnerOverride,
@@ -84,6 +85,21 @@ describe("resolveAutoRunnerChain", () => {
       "claude_cli",
       "copilot_cli",
     ]);
+  });
+
+  it("prefers cursor-agent when agent is also on PATH", async () => {
+    delete process.env.CURSOR_CLI_BIN;
+    delete process.env.IMEMORY_CURSOR_CLI_BIN;
+    const { chain, diagnostics } = await resolveAutoRunnerChainWithDiagnostics({
+      cursorKey: "",
+      commandExists: async (cmd) => cmd === "cursor-agent" || cmd === "agent",
+      openRouterKey: "",
+      tokenRouterKey: "",
+    });
+    expect(chain[0]).toBe("cursor_cli");
+    expect(diagnostics.find((entry) => entry.runner === "cursor_cli")?.reason).toBe(
+      "binary found: cursor-agent",
+    );
   });
 
   it("skips missing binaries", async () => {

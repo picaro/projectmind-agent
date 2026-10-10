@@ -1,16 +1,56 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createCursorCliRunner,
   formatCursorCliExitError,
   installCursorWorkspaceMcpConfig,
   parseCursorCliModelRejection,
   pickClosestCursorCliModel,
+  resolveCursorCliCommand,
   resolveCursorCliModelFlag,
   sanitizeCursorCliExtraArgs,
 } from "./cursor-cli.js";
+
+describe("resolveCursorCliCommand", () => {
+  const envKeys = ["CURSOR_CLI_BIN", "IMEMORY_CURSOR_CLI_BIN"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of envKeys) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of envKeys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it("prefers cursor-agent when both binaries exist", async () => {
+    const seen: string[] = [];
+    const bin = await resolveCursorCliCommand(async (cmd) => {
+      seen.push(cmd);
+      return cmd === "cursor-agent" || cmd === "agent";
+    });
+    expect(bin).toBe("cursor-agent");
+    expect(seen).toEqual(["cursor-agent"]);
+  });
+
+  it("falls back to agent when cursor-agent is not installed", async () => {
+    const bin = await resolveCursorCliCommand(async (cmd) => cmd === "agent");
+    expect(bin).toBe("agent");
+  });
+
+  it("honors an explicit command over PATH", async () => {
+    const bin = await resolveCursorCliCommand(async () => true, "/tmp/cursor-agent");
+    expect(bin).toBe("/tmp/cursor-agent");
+  });
+});
 
 describe("resolveCursorCliModelFlag", () => {
   it("omits the ProjectMind default sentinel", () => {
@@ -335,6 +375,51 @@ echo '{"type":"result","result":"mcp ok"}'
 
     expect(result.status).toBe("succeeded");
     expect(result.summary).toBe("mcp ok");
+  });
+
+  it("spawns cursor-agent when agent on PATH is a different CLI", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "imemory-cursor-bin-"));
+    const cursorAgent = path.join(dir, "cursor-agent");
+    const otherAgent = path.join(dir, "agent");
+    fs.writeFileSync(
+      cursorAgent,
+      `#!/bin/sh
+echo '{"type":"result","result":"from-cursor-agent"}'
+`,
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      otherAgent,
+      `#!/bin/sh
+echo "unexpected argument '--force'" >&2
+exit 2
+`,
+      { mode: 0o755 },
+    );
+
+    const savedPath = process.env.PATH;
+    const savedCursor = process.env.CURSOR_CLI_BIN;
+    const savedImemory = process.env.IMEMORY_CURSOR_CLI_BIN;
+    delete process.env.CURSOR_CLI_BIN;
+    delete process.env.IMEMORY_CURSOR_CLI_BIN;
+    process.env.PATH = `${dir}${path.delimiter}${savedPath ?? ""}`;
+    try {
+      const runner = createCursorCliRunner({});
+      const result = await runner.run({
+        cwd: dir,
+        prompt: "do the thing",
+        onLog: () => {},
+        signal: new AbortController().signal,
+      });
+      expect(result.status).toBe("succeeded");
+      expect(result.summary).toBe("from-cursor-agent");
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedCursor === undefined) delete process.env.CURSOR_CLI_BIN;
+      else process.env.CURSOR_CLI_BIN = savedCursor;
+      if (savedImemory === undefined) delete process.env.IMEMORY_CURSOR_CLI_BIN;
+      else process.env.IMEMORY_CURSOR_CLI_BIN = savedImemory;
+    }
   });
 });
 

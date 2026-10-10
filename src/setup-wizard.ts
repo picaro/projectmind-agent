@@ -3,10 +3,10 @@ import { writeFile, access, readFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { stdin, stdout } from "node:process";
+import { resolveCursorCliCommand } from "./runners/cursor-cli.js";
 import {
   commandExists,
   cursorApiKey,
-  cursorCliBin,
   codexCliBin,
   antigravityCliBin,
   claudeCliBin,
@@ -80,8 +80,8 @@ async function detectAvailableRunners(): Promise<RunnerAvailability[]> {
     });
   }
   
-  // cursor_cli - requires agent binary
-  const cursorBin = cursorCliBin();
+  // cursor_cli — prefer cursor-agent so Grok's `agent` binary is not selected
+  const cursorBin = await resolveCursorCliCommand(commandExists);
   const cursorCliExists = await commandExists(cursorBin);
   if (cursorCliExists) {
     results.push({

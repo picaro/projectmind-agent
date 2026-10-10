@@ -153,7 +153,7 @@ async function checkRunners(): Promise<DiagnosticIssue[]> {
         fix = "Set CURSOR_API_KEY in .env to enable Cursor SDK runner";
         break;
       case "cursor_cli":
-        fix = `Install Cursor Agent CLI from https://cursor.com (looking for '${cursorCliBin()}' on PATH)`;
+        fix = `Install Cursor Agent CLI from https://cursor.com (looking for '${cursorCliBin()}' on PATH; \`agent\` is used only when \`cursor-agent\` is absent)`;
         break;
       case "codex_cli":
         fix = `Install Codex CLI: npm i -g @openai/codex (looking for '${codexCliBin()}' on PATH)`;
