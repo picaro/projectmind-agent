@@ -2,6 +2,21 @@ import { runCliProcess } from "./cli-process.js";
 import type { Runner, RunnerResult } from "./types.js";
 
 /**
+ * Cursor catalog ids are not in `agy models`. Grok High maps to Antigravity's
+ * strong model; other Cursor/Composer leftovers are dropped so agy uses its default.
+ */
+export function resolveAntigravityCliModel(model?: string | null): string | undefined {
+  const trimmed = model?.trim() ?? "";
+  const key = trimmed.toLowerCase();
+  if (!trimmed || key === "auto" || key === "default") return undefined;
+  if (key.startsWith("cursor-grok-")) return "claude-opus-4-6-thinking";
+  if (key.startsWith("cursor-") || key.startsWith("composer-") || key === "composer") {
+    return undefined;
+  }
+  return trimmed;
+}
+
+/**
  * Google Antigravity CLI (`agy`) non-interactive runner.
  * Uses print mode + skip-permissions for headless Mac-agent jobs.
  */
@@ -30,9 +45,18 @@ export function createAntigravityCliRunner(options: {
     name: "antigravity_cli",
     async run({ cwd, prompt, onLog, signal, timeoutMs }): Promise<RunnerResult> {
       const args: string[] = [];
+      const resolvedModel = resolveAntigravityCliModel(model);
+      if (model && resolvedModel !== model) {
+        await onLog(
+          resolvedModel
+            ? `Mapped Antigravity model ${model} → ${resolvedModel}`
+            : `Dropped foreign model ${model}; using Antigravity default`,
+          "status",
+        );
+      }
 
-      if (model) {
-        args.push("--model", model);
+      if (resolvedModel) {
+        args.push("--model", resolvedModel);
       }
       if (skipPermissions) {
         args.push("--dangerously-skip-permissions");
@@ -54,7 +78,7 @@ export function createAntigravityCliRunner(options: {
 
       await onLog(
         `Starting Antigravity CLI (${command}) in ${cwd}` +
-          (model ? ` model=${model}` : "") +
+          (resolvedModel ? ` model=${resolvedModel}` : "") +
           (skipPermissions ? " skip-permissions" : ""),
         "status",
       );
@@ -71,7 +95,7 @@ export function createAntigravityCliRunner(options: {
         return {
           status: "cancelled",
           summary: result.stdout.trim().slice(0, 8_000) || "Cancelled",
-          model: model || "default",
+          model: resolvedModel || "default",
         };
       }
 
@@ -83,7 +107,7 @@ export function createAntigravityCliRunner(options: {
           error:
             `Antigravity CLI exited with code ${result.code ?? "?"}` +
             (errTail ? `: ${errTail}` : ""),
-          model: model || "default",
+          model: resolvedModel || "default",
         };
       }
 
@@ -91,7 +115,7 @@ export function createAntigravityCliRunner(options: {
       return {
         status: "succeeded",
         summary,
-        model: model || "default",
+        model: resolvedModel || "default",
       };
     },
   };

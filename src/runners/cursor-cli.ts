@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { runCliProcess, tryParseJsonLine } from "./cli-process.js";
@@ -252,6 +253,44 @@ function tryMirrorMcpConfigFile(sourcePath: string, cwd: string): void {
 }
 
 /**
+ * Cursor's CLI binary. Prefer `cursor-agent`: the bare name `agent` is also
+ * Grok's CLI, which rejects Cursor flags such as `--force`.
+ */
+export const CURSOR_CLI_PREFERRED_BIN = "cursor-agent";
+export const CURSOR_CLI_COMPAT_BIN = "agent";
+
+export function cursorCliBinFromEnv(): string {
+  return process.env.IMEMORY_CURSOR_CLI_BIN?.trim() || process.env.CURSOR_CLI_BIN?.trim() || "";
+}
+
+function binOnPath(command: string): Promise<boolean> {
+  const trimmed = command.trim();
+  if (!trimmed || trimmed.includes("/") || trimmed.includes("\\")) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const child = spawn("which", [trimmed], { stdio: ["ignore", "ignore", "ignore"] });
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+}
+
+/**
+ * Pick the Cursor CLI command. An explicit path or `CURSOR_CLI_BIN` /
+ * `IMEMORY_CURSOR_CLI_BIN` wins. Otherwise use `cursor-agent` when it is on
+ * PATH, and only then the legacy `agent` name.
+ */
+export async function resolveCursorCliCommand(
+  exists: (command: string) => Promise<boolean> = binOnPath,
+  explicit?: string | null,
+): Promise<string> {
+  const configured = explicit?.trim() || cursorCliBinFromEnv();
+  if (configured) return configured;
+  if (await exists(CURSOR_CLI_PREFERRED_BIN)) return CURSOR_CLI_PREFERRED_BIN;
+  return CURSOR_CLI_COMPAT_BIN;
+}
+
+/**
  * Cursor CLI has no `--mcp-config` flag. Install ProjectMind MCP into the
  * workspace file it actually reads: `<cwd>/.cursor/mcp.json`.
  * Merges with any existing servers so project MCP entries are kept.
@@ -290,18 +329,16 @@ export function installCursorWorkspaceMcpConfig(
 }
 
 export function createCursorCliRunner(options: {
-  /** Binary name or path. Default: agent (Cursor Agent CLI). */
+  /** Binary name or path. When omitted, prefer `cursor-agent` over `agent`. */
   command?: string;
   apiKey?: string;
   model?: string;
   /** Extra args after fixed flags, before the prompt. */
   extraArgs?: string[];
+  /** Test hook for PATH lookup. Production uses `which`. */
+  commandExists?: (command: string) => Promise<boolean>;
 }): Runner {
-  const command =
-    options.command?.trim() ||
-    process.env.IMEMORY_CURSOR_CLI_BIN?.trim() ||
-    process.env.CURSOR_CLI_BIN?.trim() ||
-    "agent";
+  const explicitCommand = options.command?.trim() || cursorCliBinFromEnv();
   const configuredModel = options.model?.trim() || process.env.IMEMORY_CURSOR_MODEL?.trim();
 
   return {
@@ -316,6 +353,8 @@ export function createCursorCliRunner(options: {
       }
 
       let lastAssistant = "";
+
+      const command = await resolveCursorCliCommand(options.commandExists, explicitCommand);
 
       const spawnOnce = async () => {
         const args = [

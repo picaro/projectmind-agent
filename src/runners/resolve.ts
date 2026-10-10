@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import type { Runner, RunnerName, RunnerResult } from "./types.js";
 import { createCursorSdkRunner } from "./cursor.js";
-import { createCursorCliRunner } from "./cursor-cli.js";
+import { createCursorCliRunner, resolveCursorCliCommand } from "./cursor-cli.js";
 import { createCodexCliRunner } from "./codex-cli.js";
 import { createAntigravityCliRunner } from "./antigravity-cli.js";
 import { createClaudeCliRunner } from "./claude-cli.js";
@@ -68,7 +68,9 @@ export function copilotApiKey(): string {
 
 export function cursorCliBin(): string {
   return (
-    process.env.IMEMORY_CURSOR_CLI_BIN?.trim() || process.env.CURSOR_CLI_BIN?.trim() || "agent"
+    process.env.IMEMORY_CURSOR_CLI_BIN?.trim() ||
+    process.env.CURSOR_CLI_BIN?.trim() ||
+    "cursor-agent"
   );
 }
 
@@ -151,7 +153,7 @@ export async function resolveAutoRunnerChainWithDiagnostics(
 ): Promise<{ chain: AutoRunnerName[]; diagnostics: RunnerAvailabilityEntry[] }> {
   const key = deps.cursorKey ?? cursorApiKey();
   const exists = deps.commandExists ?? commandExists;
-  const cursorBin = deps.cursorBin ?? cursorCliBin();
+  const cursorBin = deps.cursorBin?.trim() || (await resolveCursorCliCommand(exists));
   const codexBin = deps.codexBin ?? codexCliBin();
   const antigravityBin = deps.antigravityBin ?? antigravityCliBin();
   const claudeBin = deps.claudeBin ?? claudeCliBin();
@@ -182,7 +184,7 @@ export async function resolveAutoRunnerChainWithDiagnostics(
     });
   }
 
-  // cursor_cli: requires agent binary on PATH
+  // cursor_cli: requires cursor-agent (or legacy `agent`) on PATH
   const cursorExists = await exists(cursorBin);
   if (cursorExists) {
     chain.push("cursor_cli");
@@ -396,7 +398,6 @@ export function createRunnerByName(
 
   if (name === "cursor_cli") {
     return createCursorCliRunner({
-      command: cursorCliBin(),
       apiKey: cursorApiKey() || undefined,
       model: override || safeConfiguredModel(process.env.IMEMORY_CURSOR_MODEL),
     });
