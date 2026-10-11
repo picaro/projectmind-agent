@@ -45,7 +45,14 @@ import {
   showVersion,
 } from "./cli-commands.js";
 import { resolveAutoRunnerChainWithDiagnostics } from "./runners/resolve.js";
-import { parseExecJobArgs, stopAllChildWorkers } from "./child-jobs.js";
+import { liveChildWorkerCount, parseExecJobArgs, stopAllChildWorkers } from "./child-jobs.js";
+import {
+  ContinuousTestCoordinator,
+  continuousTestsEnabled,
+  defaultRunnerDeps,
+} from "./continuous-test-runner.js";
+import { detectPlaywrightBrowsers, recordProjectWorkspace } from "./continuous-test-workspace.js";
+import { CONTINUOUS_TEST_AGENT_META_FLAG } from "./improvement-contracts/continuous-test-job.js";
 
 const cwd = process.cwd();
 const execDir = dirname(process.execPath);
@@ -107,7 +114,13 @@ async function reportHeartbeat(
   // string, so an agent that has not been updated keeps today's behaviour
   // exactly.
   meta.managedWorkspaceRoot = resolveManagedRoot();
-  meta.capabilities = { managedClone: true };
+  const continuousTests = continuousTestsEnabled();
+  meta.capabilities = { managedClone: true, continuousTests };
+  // The control plane only targets idle-time browser tests at agents that set
+  // this flag AND have the human "Allow Playwright" toggle on.
+  meta[CONTINUOUS_TEST_AGENT_META_FLAG] = continuousTests;
+  const playwrightAvailable = detectPlaywrightBrowsers();
+  if (playwrightAvailable !== null) meta.playwrightAvailable = playwrightAvailable;
 
   const response = await callToolJson<{
     agent?: { meta?: Record<string, unknown> | null };
@@ -417,6 +430,18 @@ async function main(): Promise<void> {
   }
 
   let client = await connectMcpClient(mcpUrl, apiKey);
+  const continuousTests = new ContinuousTestCoordinator({
+    deps: defaultRunnerDeps((name, toolArgs) => callToolJson(client, name, toolArgs), info.agentKey),
+    enabled: continuousTestsEnabled(),
+    claimIntervalMs: parseIntervalMs(process.env.IMEMORY_CONTINUOUS_TEST_POLL_MS, 30_000, 5_000),
+  });
+  console.log(`  Continuous tests: ${continuousTests.enabled ? "on (idle only)" : "off"}`);
+  try {
+    const orphans = await continuousTests.reconcileOrphans();
+    if (orphans > 0) console.log(`Continuous tests: cleaned ${orphans} orphaned run(s) from a previous start`);
+  } catch (err) {
+    console.warn("Continuous test orphan cleanup skipped:", err instanceof Error ? err.message : err);
+  }
   let stopping = false;
   // busy also gates health-check mode, so job polling and health checks never overlap.
   const runState = { busy: false, lastHealthCheckRequestedAt: null as string | null };
@@ -450,6 +475,7 @@ async function main(): Promise<void> {
       }
       clearActiveJob(active.jobId);
     }
+    await continuousTests.shutdown();
     await stopAllChildWorkers();
     await client.close().catch(() => {});
     process.exit(0);
@@ -496,7 +522,7 @@ async function main(): Promise<void> {
     try {
       if (!runState.busy) {
         const now = Date.now();
-        if (autoUpdate && now - lastUpdateCheckAt >= updateCheckMs) {
+        if (autoUpdate && !continuousTests.isRunning() && now - lastUpdateCheckAt >= updateCheckMs) {
           lastUpdateCheckAt = now;
           const update = await maybeSelfUpdate(mcpUrl, { busy: false });
           if (update.updated) {
@@ -534,6 +560,16 @@ async function main(): Promise<void> {
               modelGateway,
             } = claimed;
             runState.busy = true;
+            if (continuousTests.isRunning()) {
+              console.log("User job arrived — stopping the idle-time test run first");
+              await continuousTests.preemptForUserJob();
+            }
+            recordProjectWorkspace({
+              projectId: job.project_id,
+              projectSlug: managedWorkspace?.projectSlug ?? null,
+              localDirectory:
+                taskWorkspace?.baseLocalPath || managedWorkspace?.localPath || job.local_directory,
+            });
             console.log("─".repeat(60));
             console.log(
               `Claimed job ${job.id}\n` +
@@ -584,6 +620,16 @@ async function main(): Promise<void> {
               runState.busy = false;
               console.log("Ready for next job.");
             }
+          }
+        }
+
+        // Idle: no user job, health check, or child worker → at most one background test run.
+        if (!runState.busy && !stopping && liveChildWorkerCount() === 0) {
+          const run = await continuousTests.maybeClaimAndStart();
+          if (run) {
+            console.log(
+              `Idle-time test run ${run.payload.runId} started (${run.payload.environment}/${run.payload.suite})`,
+            );
           }
         }
       }

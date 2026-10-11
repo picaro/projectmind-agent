@@ -193,6 +193,58 @@ After a **successful implement** job, if the workspace is a git repo with uncomm
 
 Skip git with `IMEMORY_AGENT_GIT_COMMIT=0` or commit-only with `IMEMORY_AGENT_GIT_PUSH=0`. Sensitive paths (e.g. `.env`) are refused. Git failures are logged into the job result but do not flip a successful run to failed.
 
+## Idle-time continuous testing (Playwright)
+
+The agent runs a project's reviewed Playwright smoke suite against its published URL **only while it has nothing else to do** (contract `continuous_test` 1.0, see `src/improvement-contracts/continuous-test-job.ts`).
+
+**Enable**
+
+1. ProjectMind Admin → Feature flags → *Idle-time continuous testing*.
+2. Agents page → turn on **Allow Playwright** for this computer.
+3. Project Settings → Automation → *Continuous testing* → on.
+4. On this computer: Playwright browsers in the user cache (`npx playwright install chromium`), and the project checkout under `IMEMORY_WORKSPACE_ALLOWLIST` (or the managed root).
+
+The heartbeat advertises `supportsContinuousTests: true` (plus `playwrightAvailable` when the browser cache can be inspected). Opt this computer out with `IMEMORY_CONTINUOUS_TESTS=0`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `IMEMORY_CONTINUOUS_TESTS` | on | `0`/`off` stops advertising and claiming test runs |
+| `IMEMORY_CONTINUOUS_TEST_POLL_MS` | `30000` | Minimum gap between claim attempts while idle |
+| `IMEMORY_CONTINUOUS_TEST_WORKSPACES` | — | `slug=/abs/checkout,…` checkout per project (slug or project id) |
+
+**Which checkout**: payload `localDirectory`, else `IMEMORY_CONTINUOUS_TEST_WORKSPACES`, else the checkout this agent last used for a user job in that project. It must pass the same allowlist/realpath check as user jobs, or the run is refused (`infra_error`).
+
+**What a run does**
+
+1. Claims only when no user job, health check, or child worker is active — at most one run per agent. A user job claimed mid-run stops the test first.
+2. `git worktree add --detach` of the requested test-code revision under `{managedRoot}/.pm-continuous-tests/<runId>/worktree` (the base checkout is never touched).
+3. Pinned install from the lockfile with `--ignore-scripts` (`pnpm install --frozen-lockfile` / `npm ci` / `yarn --frozen-lockfile`); no lockfile → refused. Checks `@playwright/test` is installed, browsers exist, and the target answers (5xx/network error → `target_unavailable`).
+4. Spawns the server's argv exactly (`shell: false`, own process group, fixed cwd). Env = `PATH`/`HOME`/locale/`PLAYWRIGHT_BROWSERS_PATH` + the payload env + `PLAYWRIGHT_JSON_OUTPUT_NAME`, `PROJECTMIND_ALLOWED_HOSTS`. The agent's own env (API keys) is never passed; payload env may not set `PATH`, `NODE_OPTIONS`, `DYLD_*`, `npm_config_*`, etc.
+5. Renews the lease every `heartbeatIntervalSeconds`. On server abort (user work / cancel), timeout, or a local user job: SIGTERM the group → `gracefulPreemptMs` → SIGKILL → complete `preempted` / `cancelled` / `timed_out`. Lost lease → kill and stop without completing.
+6. Reads the JSON report even on a non-zero exit, strips attachment bodies/stdio/config, scrubs secrets, caps at 2 MB. On failures uploads screenshots → traces → videos from inside the worktree (≤ `maxFiles`, ≤ `maxBytesPerFile`; never storageState/HAR/env files).
+7. Always removes the worktree and run directory. On startup, leftovers from a crashed agent are killed (only process groups running Playwright), reported as `infra_error`, and deleted.
+
+**Navigation allowlist**: the agent cannot intercept browser traffic itself, so it exports `PROJECTMIND_ALLOWED_HOSTS` (comma-separated) for the project's Playwright fixture to enforce:
+
+```ts
+// tests/e2e/fixtures.ts — import { test, expect } from "./fixtures" in specs
+import { test as base, expect } from "@playwright/test";
+
+export const test = base.extend({
+  context: async ({ context }, use) => {
+    const allowed = (process.env.PROJECTMIND_ALLOWED_HOSTS ?? "").split(",").filter(Boolean);
+    if (allowed.length > 0) {
+      await context.route("**/*", (route) => {
+        const host = new URL(route.request().url()).hostname;
+        return allowed.includes(host) ? route.continue() : route.abort("blockedbyclient");
+      });
+    }
+    await use(context);
+  },
+});
+export { expect };
+```
+
 ## Safety
 
 - Only explicitly enqueued jobs run
