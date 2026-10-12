@@ -122,6 +122,18 @@ export function isSafeGitRevision(rev: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._/@^~-]{0,199}$/.test(rev) && !rev.includes("..");
 }
 
+/**
+ * Origin's default branch from `git ls-remote --symref origin HEAD`
+ * (`ref: refs/heads/main\tHEAD`) or `git symbolic-ref refs/remotes/origin/HEAD`
+ * (`refs/remotes/origin/main`). Null when neither matches or the name is unsafe.
+ */
+export function parseOriginDefaultBranch(output: string): string | null {
+  const match =
+    output.match(/^ref: refs\/heads\/(\S+)\tHEAD$/m) ?? output.trim().match(/^refs\/remotes\/origin\/(\S+)$/);
+  const branch = match?.[1];
+  return branch && isSafeGitRevision(branch) ? branch : null;
+}
+
 export type RunPaths = {
   runDir: string;
   worktree: string;

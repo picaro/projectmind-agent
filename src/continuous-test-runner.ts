@@ -45,6 +45,7 @@ import {
   isSafeGitRevision,
   listRunStates,
   lockfileInstallCommand,
+  parseOriginDefaultBranch,
   resolveTestWorkspace,
   runPaths,
   writeRunState,
@@ -103,7 +104,10 @@ type StepResult = { ok: true; stdout: string } | { ok: false; aborted: boolean; 
 
 type PrepareFailure = { outcome: "infra_error" | "target_unavailable"; reason: string };
 
+type TestCode = { sha: string; note: string | null };
+
 const STEP_TIMEOUT_MS = 10 * 60_000;
+const FETCH_TIMEOUT_MS = 2 * 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,6 +129,8 @@ export class ContinuousTestRun {
   private phase: "preparing" | "running" = "preparing";
   private baseDir: string | null = null;
   private commitSha: string | null = null;
+  /** Set when the run could not test what the server asked for; leads the errorSummary. */
+  private testCodeNote: string | null = null;
   readonly done: Promise<RunSummary>;
 
   constructor(payload: ContinuousTestJobPayload, deps: RunnerDeps) {
@@ -231,6 +237,9 @@ export class ContinuousTestRun {
     if (p.testCodeRevision !== null && !isSafeGitRevision(p.testCodeRevision)) {
       return { outcome: "infra_error", reason: "Refused: testCodeRevision is not a plain git revision" };
     }
+    if (p.testCodeRef !== undefined && !isSafeGitRevision(p.testCodeRef)) {
+      return { outcome: "infra_error", reason: "Refused: testCodeRef is not a plain git ref" };
+    }
     const resolved = resolveTestWorkspace({
       projectId: p.projectId,
       projectSlug: p.projectSlug,
@@ -244,17 +253,11 @@ export class ContinuousTestRun {
     fs.mkdirSync(this.paths.tmpDir, { recursive: true });
     this.writeState(null);
 
-    // isSafeGitRevision guarantees `rev` cannot be read as an option (git < 2.24 lacks --end-of-options).
-    const rev = p.testCodeRevision ?? "HEAD";
-    const revParse = ["git", "rev-parse", "--verify", "--quiet", `${rev}^{commit}`];
-    let verify = await this.step(revParse, resolved.baseDir, "git rev-parse");
-    if (!verify.ok && !verify.aborted && p.testCodeRevision) {
-      await this.step(["git", "fetch", "--quiet", "origin", p.testCodeRevision], resolved.baseDir, "git fetch", 2 * 60_000);
-      verify = await this.step(revParse, resolved.baseDir, "git rev-parse");
-    }
-    if (!verify.ok) return verify.aborted ? "aborted" : { outcome: "infra_error", reason: `Test code revision ${rev} not found` };
-    this.commitSha = verify.stdout.trim().split("\n")[0] ?? null;
-    if (!this.commitSha) return { outcome: "infra_error", reason: "Could not resolve test code revision" };
+    const testCode = await this.resolveTestCode(resolved.baseDir);
+    if (testCode === "aborted" || "outcome" in testCode) return testCode;
+    this.commitSha = testCode.sha;
+    this.testCodeNote = testCode.note;
+    this.log(`test code ${testCode.sha.slice(0, 12)}${testCode.note ? ` (${testCode.note})` : ""}`);
 
     const add = await this.step(
       ["git", "worktree", "add", "--detach", this.paths.worktree, this.commitSha],
@@ -284,6 +287,82 @@ export class ContinuousTestRun {
     const reach = await checkTargetReachable(p.baseUrl, this.deps.fetchImpl);
     if (!reach.ok) return { outcome: "target_unavailable", reason: reach.reason };
     return { cwd: this.paths.worktree };
+  }
+
+  /**
+   * The commit to test. May fetch into the base checkout's object store and its
+   * `refs/remotes/origin/*`, but never moves its HEAD, index, or working tree:
+   * the commit is only ever checked out in the per-run worktree.
+   */
+  private async resolveTestCode(baseDir: string): Promise<PrepareFailure | "aborted" | TestCode> {
+    const pinned = this.payload.testCodeRevision;
+    const { found, note } = pinned
+      ? { found: await this.resolvePinnedRevision(baseDir, pinned), note: null }
+      : await this.resolveOriginTip(baseDir);
+    if (!found.ok) {
+      return found.aborted ? "aborted" : { outcome: "infra_error", reason: `Test code revision ${pinned ?? "HEAD"} not found` };
+    }
+    const sha = found.stdout.trim().split("\n")[0];
+    return sha ? { sha, note } : { outcome: "infra_error", reason: "Could not resolve test code revision" };
+  }
+
+  private async resolvePinnedRevision(baseDir: string, sha: string): Promise<StepResult> {
+    let found = await this.verifyCommit(baseDir, sha);
+    if (!found.ok && !found.aborted) {
+      await this.fetchOrigin(baseDir, sha);
+      found = await this.verifyCommit(baseDir, sha);
+    }
+    const ref = this.payload.testCodeRef;
+    if (!found.ok && !found.aborted && ref) {
+      // Some remotes refuse fetch-by-SHA; the branch the SHA was read from still contains it.
+      await this.fetchBranch(baseDir, ref);
+      found = await this.verifyCommit(baseDir, sha);
+    }
+    return found;
+  }
+
+  /** No pin from the server: test origin's tip, not whatever this checkout last pulled. */
+  private async resolveOriginTip(baseDir: string): Promise<{ found: StepResult; note: string | null }> {
+    const branch = this.payload.testCodeRef ?? (await this.originDefaultBranch(baseDir));
+    let note = "Tested local HEAD: could not find origin's default branch";
+    if (branch) {
+      const fetched = await this.fetchBranch(baseDir, branch);
+      const tip = fetched.ok ? await this.verifyCommit(baseDir, `refs/remotes/origin/${branch}`) : fetched;
+      if (tip.ok || tip.aborted) return { found: tip, note: null };
+      this.log(`could not fetch origin/${branch}: ${summarizeError(tip.detail, this.secrets)}`);
+      note = `Tested local HEAD: could not fetch origin/${branch}`;
+    }
+    return { found: await this.verifyCommit(baseDir, "HEAD"), note };
+  }
+
+  /** Ask origin for its HEAD; fall back to the `origin/HEAD` recorded at clone time. */
+  private async originDefaultBranch(baseDir: string): Promise<string | null> {
+    const remote = await this.step(["git", "ls-remote", "--symref", "origin", "HEAD"], baseDir, "git ls-remote", FETCH_TIMEOUT_MS);
+    const fromRemote = remote.ok ? parseOriginDefaultBranch(remote.stdout) : null;
+    if (fromRemote) return fromRemote;
+    const local = await this.step(["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], baseDir, "git symbolic-ref");
+    return local.ok ? parseOriginDefaultBranch(local.stdout) : null;
+  }
+
+  // isSafeGitRevision on every rev/branch below means none can be read as an option
+  // (git < 2.24 lacks --end-of-options).
+  private verifyCommit(baseDir: string, rev: string): Promise<StepResult> {
+    return this.step(["git", "rev-parse", "--verify", "--quiet", `${rev}^{commit}`], baseDir, "git rev-parse");
+  }
+
+  private fetchOrigin(baseDir: string, refspec: string): Promise<StepResult> {
+    return this.step(["git", "fetch", "--quiet", "origin", refspec], baseDir, "git fetch", FETCH_TIMEOUT_MS);
+  }
+
+  /** Explicit refspec so `origin/<branch>` is updated even in a single-branch clone. */
+  private fetchBranch(baseDir: string, branch: string): Promise<StepResult> {
+    return this.fetchOrigin(baseDir, `+refs/heads/${branch}:refs/remotes/origin/${branch}`);
+  }
+
+  /** Cause first: a run that fell back to local HEAD says so even when it passed. */
+  private finalErrorSummary(text: string | null): string | null {
+    const joined = [this.testCodeNote, text].filter(Boolean).join(". ");
+    return joined ? summarizeError(joined, this.secrets) : null;
   }
 
   private writeState(pid: number | null): void {
@@ -365,7 +444,7 @@ export class ContinuousTestRun {
       }
 
       summary.outcome = outcome;
-      summary.errorSummary = errorSummary ? summarizeError(errorSummary, this.secrets) : null;
+      summary.errorSummary = this.finalErrorSummary(errorSummary);
       summary.completed = await this.complete({
         runId: p.runId,
         leaseId: p.leaseId,
@@ -382,7 +461,7 @@ export class ContinuousTestRun {
       const message = err instanceof Error ? err.message : String(err);
       this.log(`crashed: ${message}`);
       summary.outcome = "infra_error";
-      summary.errorSummary = summarizeError(`Agent error: ${message}`, this.secrets);
+      summary.errorSummary = this.finalErrorSummary(`Agent error: ${message}`);
       if (this.abortReason !== "lease_lost") {
         summary.completed = await this.complete({
           runId: p.runId,
