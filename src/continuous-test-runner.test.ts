@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import {
   reconcileOrphanedRuns,
   type RunnerDeps,
 } from "./continuous-test-runner.js";
-import type { ManagedProcess, ProcessExit, SpawnOptions } from "./continuous-test-process.js";
+import { spawnProcessGroup, type ManagedProcess, type ProcessExit, type SpawnOptions } from "./continuous-test-process.js";
 import type { ContinuousTestJobPayload } from "./improvement-contracts/continuous-test-job.js";
 import { runPaths, writeRunState } from "./continuous-test-workspace.js";
 
@@ -238,6 +239,8 @@ beforeEach(() => {
       let proc: FakeProc;
       if (argv[0] === "git" && argv[1] === "rev-parse") {
         proc = exitedProc(0, "deadbeefcafe\n");
+      } else if (argv[0] === "git" && argv[1] === "ls-remote") {
+        proc = exitedProc(0, "ref: refs/heads/main\tHEAD\ndeadbeefcafe\tHEAD\n");
       } else if (argv[0] === "git" && argv[1] === "worktree" && argv[2] === "add") {
         const wt = argv[4]!;
         fs.mkdirSync(path.join(wt, "node_modules", ".bin"), { recursive: true });
@@ -436,6 +439,12 @@ describe("ContinuousTestRun", () => {
     expect(h.spawned).toHaveLength(0);
   });
 
+  it("refuses a testCodeRef git could read as an option", async () => {
+    await new ContinuousTestRun(payload({ testCodeRef: "--upload-pack=evil" }), h.deps).done;
+    expect(String(completion()!.errorSummary)).toMatch(/testCodeRef is not a plain git ref/);
+    expect(h.spawned).toHaveLength(0);
+  });
+
   it("refuses a baseUrl outside allowedHosts", async () => {
     await new ContinuousTestRun(payload({ allowedHosts: ["other.example.com"] }), h.deps).done;
     expect(String(completion()!.errorSummary)).toMatch(/allowedHosts/);
@@ -556,8 +565,6 @@ describe("ContinuousTestCoordinator", () => {
 
 describe("real git worktree", () => {
   it("checks out the requested revision in an isolated worktree and removes it afterwards", async () => {
-    const { execFileSync } = await import("node:child_process");
-    const { spawnProcessGroup } = await import("./continuous-test-process.js");
     fs.rmSync(path.join(h.baseDir, ".git"), { recursive: true, force: true });
     const git = (...args: string[]) =>
       execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: h.baseDir }).toString().trim();
@@ -590,6 +597,158 @@ describe("real git worktree", () => {
     expect(fs.existsSync(runPaths(h.stateRoot, RUN_ID).runDir)).toBe(false);
     expect(git("worktree", "list").split("\n")).toHaveLength(1);
     expect(fs.readFileSync(path.join(h.baseDir, "marker.txt"), "utf8")).toBe("v2");
+  });
+});
+
+function gitIn(cwd: string) {
+  return (...args: string[]) =>
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+      .toString()
+      .trim();
+}
+
+describe("test code from origin (real git)", () => {
+  let origin: string;
+  let upstream: (...args: string[]) => string;
+  let user: (...args: string[]) => string;
+  let commits: Record<string, string>;
+  let seenMarker: string | null;
+  let baseDirGitCommands: string[];
+
+  /** Commit `marker.txt = name` in the upstream clone and push it to origin's `branch`. */
+  function pushCommit(name: string, branch = "main"): string {
+    fs.writeFileSync(path.join(h.root, "upstream", "marker.txt"), name);
+    upstream("commit", "-qam", name);
+    upstream("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    commits[name] = upstream("rev-parse", "HEAD");
+    return commits[name]!;
+  }
+
+  // origin.git ← upstream pushes v1, then the user clones (on `feature`, with an
+  // uncommitted edit), then upstream pushes v2 the user's checkout has never seen.
+  beforeEach(() => {
+    commits = {};
+    seenMarker = null;
+    baseDirGitCommands = [];
+    origin = path.join(h.root, "origin.git");
+    execFileSync("git", ["init", "-q", "--bare", origin]);
+    gitIn(origin)("symbolic-ref", "HEAD", "refs/heads/main");
+    const upstreamDir = path.join(h.root, "upstream");
+    execFileSync("git", ["clone", "-q", origin, upstreamDir], { stdio: "ignore" });
+    upstream = gitIn(upstreamDir);
+    fs.writeFileSync(path.join(upstreamDir, "pnpm-lock.yaml"), "lockfileVersion: 9");
+    fs.writeFileSync(path.join(upstreamDir, "marker.txt"), "");
+    upstream("add", ".");
+    upstream("commit", "-qm", "init");
+    pushCommit("v1");
+
+    fs.rmSync(h.baseDir, { recursive: true, force: true });
+    execFileSync("git", ["clone", "-q", origin, h.baseDir], { stdio: "ignore" });
+    user = gitIn(h.baseDir);
+    user("checkout", "-qb", "feature");
+    fs.writeFileSync(path.join(h.baseDir, "marker.txt"), "local edit");
+    pushCommit("v2");
+
+    h.deps.spawn = (argv, opts) => {
+      if (argv[0] === "git") {
+        if (opts.cwd === h.baseDir) baseDirGitCommands.push(argv[1]!);
+        return spawnProcessGroup(argv, opts);
+      }
+      if (argv[0] === "pnpm") {
+        fs.mkdirSync(path.join(opts.cwd, "node_modules", ".bin"), { recursive: true });
+        fs.writeFileSync(path.join(opts.cwd, "node_modules", ".bin", "playwright"), "");
+        return exitedProc(0);
+      }
+      seenMarker = fs.readFileSync(path.join(opts.cwd, "marker.txt"), "utf8");
+      writeReport(opts, passingReport());
+      return exitedProc(0);
+    };
+  });
+
+  /** The user's working copy: same branch, same commit, uncommitted edit intact, no extra worktrees. */
+  function expectUserCheckoutUntouched(): void {
+    expect(user("symbolic-ref", "--short", "HEAD")).toBe("feature");
+    expect(user("rev-parse", "HEAD")).toBe(commits.v1);
+    expect(user("status", "--porcelain")).toBe("M marker.txt");
+    expect(fs.readFileSync(path.join(h.baseDir, "marker.txt"), "utf8")).toBe("local edit");
+    expect(user("worktree", "list").split("\n")).toHaveLength(1);
+    expect(fs.existsSync(runPaths(h.stateRoot, RUN_ID).runDir)).toBe(false);
+    const readOnlyOrFetch = ["rev-parse", "fetch", "ls-remote", "symbolic-ref", "worktree"];
+    expect(baseDirGitCommands.filter((c) => !readOnlyOrFetch.includes(c))).toEqual([]);
+  }
+
+  it("null revision: fetches origin and tests the tip of testCodeRef, not the stale local HEAD", async () => {
+    await new ContinuousTestRun(payload({ testCodeRevision: null, testCodeRef: "main" }), h.deps).done;
+
+    expect(seenMarker).toBe("v2");
+    expect(completion()).toMatchObject({ outcome: "completed", testCodeCommitSha: commits.v2, errorSummary: null });
+    expect(baseDirGitCommands).toContain("fetch");
+    expectUserCheckoutUntouched();
+  });
+
+  it("null revision without testCodeRef: tests the tip of origin's default branch", async () => {
+    // origin's HEAD moves to `trunk` after the user cloned, so their origin/HEAD still says main.
+    upstream("checkout", "-qb", "trunk");
+    pushCommit("v3", "trunk");
+    gitIn(origin)("symbolic-ref", "HEAD", "refs/heads/trunk");
+
+    await new ContinuousTestRun(payload({ testCodeRevision: null }), h.deps).done;
+
+    expect(seenMarker).toBe("v3");
+    expect(completion()).toMatchObject({ outcome: "completed", testCodeCommitSha: commits.v3, errorSummary: null });
+    expect(baseDirGitCommands).toContain("ls-remote");
+    expectUserCheckoutUntouched();
+  });
+
+  it("null revision and origin unreachable: tests local HEAD and says so in errorSummary", async () => {
+    user("remote", "set-url", "origin", path.join(h.root, "gone.git"));
+
+    for (const testCodeRef of ["main", undefined]) {
+      h.calls.length = 0;
+      seenMarker = null;
+      await new ContinuousTestRun(payload({ testCodeRevision: null, testCodeRef }), h.deps).done;
+
+      expect(seenMarker).toBe("v1");
+      expect(completion()).toMatchObject({
+        outcome: "completed",
+        testCodeCommitSha: commits.v1,
+        errorSummary: "Tested local HEAD: could not fetch origin/main",
+      });
+      expectUserCheckoutUntouched();
+    }
+  });
+
+  it("the fallback note leads any other errorSummary", async () => {
+    user("remote", "set-url", "origin", path.join(h.root, "gone.git"));
+    h.deps.fetchImpl = (async () => new Response(null, { status: 503 })) as typeof fetch;
+
+    await new ContinuousTestRun(payload({ testCodeRevision: null, testCodeRef: "main" }), h.deps).done;
+
+    expect(completion()).toMatchObject({
+      outcome: "target_unavailable",
+      errorSummary: "Tested local HEAD: could not fetch origin/main. Target answered HTTP 503",
+    });
+  });
+
+  it("pinned SHA the remote will not serve by SHA: fetches testCodeRef, then tests the pinned SHA", async () => {
+    // v2 is no longer a branch tip, and protocol v0 without allow*SHA1InWant refuses unadvertised objects.
+    pushCommit("v3");
+    user("config", "protocol.version", "0");
+    const pinned = commits.v2!;
+
+    await new ContinuousTestRun(payload({ testCodeRevision: pinned }), h.deps).done;
+    expect(completion()).toMatchObject({ outcome: "infra_error", errorSummary: `Test code revision ${pinned} not found` });
+    expect(seenMarker).toBeNull();
+
+    h.calls.length = 0;
+    await new ContinuousTestRun(payload({ testCodeRevision: pinned, testCodeRef: "main" }), h.deps).done;
+
+    expect(seenMarker).toBe("v2");
+    expect(completion()).toMatchObject({ outcome: "completed", testCodeCommitSha: pinned, errorSummary: null });
+    expectUserCheckoutUntouched();
   });
 });
 

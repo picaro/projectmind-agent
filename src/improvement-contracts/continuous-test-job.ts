@@ -37,7 +37,15 @@ export const continuousTestJobPayloadSchema = z.object({
   baseUrl: z.string().url(),
   allowedHosts: z.array(z.string().min(1)).min(1),
   grep: z.string().min(1),
+  /**
+   * Full SHA of the test code to run (the tip of `testCodeRef` when the run was
+   * queued). Null when the server could not resolve it: then test the tip of
+   * `origin/<testCodeRef>` (or origin's default branch), and only fall back to
+   * the checkout's own HEAD when that fetch fails.
+   */
   testCodeRevision: z.string().min(1).nullable(),
+  /** Branch `testCodeRevision` was read from, usually `main`. Optional within 1.0. */
+  testCodeRef: z.string().min(1).optional(),
   deployedRevision: z.object({
     deploymentId: z.string().nullable(),
     commitSha: z.string().nullable(),

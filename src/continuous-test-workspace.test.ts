@@ -8,6 +8,7 @@ import {
   hostAllowed,
   isSafeGitRevision,
   lockfileInstallCommand,
+  parseOriginDefaultBranch,
   parseWorkspaceMap,
   playwrightBrowsersDir,
   recordProjectWorkspace,
@@ -93,6 +94,16 @@ describe("helpers", () => {
     expect(isSafeGitRevision("--upload-pack=evil")).toBe(false);
     expect(isSafeGitRevision("a..b")).toBe(false);
     expect(isSafeGitRevision("a b")).toBe(false);
+  });
+
+  it("parseOriginDefaultBranch reads ls-remote --symref and origin/HEAD, rejecting unsafe names", () => {
+    expect(parseOriginDefaultBranch("ref: refs/heads/main\tHEAD\n724f0885\tHEAD\n")).toBe("main");
+    expect(parseOriginDefaultBranch("ref: refs/heads/release/2026\tHEAD\n")).toBe("release/2026");
+    expect(parseOriginDefaultBranch("refs/remotes/origin/trunk\n")).toBe("trunk");
+    expect(parseOriginDefaultBranch("724f0885\tHEAD\n")).toBeNull();
+    expect(parseOriginDefaultBranch("")).toBeNull();
+    expect(parseOriginDefaultBranch("ref: refs/heads/-x\tHEAD\n")).toBeNull();
+    expect(parseOriginDefaultBranch("ref: refs/heads/a..b\tHEAD\n")).toBeNull();
   });
 
   it("lockfileInstallCommand picks a frozen, script-free install", () => {

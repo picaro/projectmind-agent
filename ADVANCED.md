@@ -217,7 +217,9 @@ The heartbeat advertises `supportsContinuousTests: true` (plus `playwrightAvaila
 **What a run does**
 
 1. Claims only when no user job, health check, or child worker is active — at most one run per agent. A user job claimed mid-run stops the test first.
-2. `git worktree add --detach` of the requested test-code revision under `{managedRoot}/.pm-continuous-tests/<runId>/worktree` (the base checkout is never touched).
+2. `git worktree add --detach` of the test code under `{managedRoot}/.pm-continuous-tests/<runId>/worktree`. The base checkout's HEAD, branch, index, and files are never touched; it is only fetched into (objects and `origin/*` refs).
+   - `testCodeRevision` set (a full SHA, normally the default-branch tip): if missing locally, `git fetch origin <sha>`, then `git fetch origin <testCodeRef>` for remotes that refuse fetch-by-SHA. Still missing → `infra_error`.
+   - `testCodeRevision: null`: fetches `testCodeRef` (or origin's default branch, from `git ls-remote --symref origin HEAD`) and tests the tip of `origin/<branch>`. Only if that fetch fails does it test the checkout's own HEAD, and `errorSummary` then starts with `Tested local HEAD: could not fetch origin/<branch>`.
 3. Pinned install from the lockfile with `--ignore-scripts` (`pnpm install --frozen-lockfile` / `npm ci` / `yarn --frozen-lockfile`); no lockfile → refused. Checks `@playwright/test` is installed, browsers exist, and the target answers (5xx/network error → `target_unavailable`).
 4. Spawns the server's argv exactly (`shell: false`, own process group, fixed cwd). Env = `PATH`/`HOME`/locale/`PLAYWRIGHT_BROWSERS_PATH` + the payload env + `PLAYWRIGHT_JSON_OUTPUT_NAME`, `PROJECTMIND_ALLOWED_HOSTS`. The agent's own env (API keys) is never passed; payload env may not set `PATH`, `NODE_OPTIONS`, `DYLD_*`, `npm_config_*`, etc.
 5. Renews the lease every `heartbeatIntervalSeconds`. On server abort (user work / cancel), timeout, or a local user job: SIGTERM the group → `gracefulPreemptMs` → SIGKILL → complete `preempted` / `cancelled` / `timed_out`. Lost lease → kill and stop without completing.
