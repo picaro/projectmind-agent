@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,6 +35,27 @@ describe("prepareEnvironment", () => {
     const result = await prepareEnvironment({ cwd: tmpRoot });
     expect(result.ok).toBe(true);
     expect(result.detectedKinds).toEqual(["unknown"]);
+  });
+
+  it("counts each runtime once and recognizes rust, go, and ruby", async () => {
+    fs.writeFileSync(path.join(tmpRoot, "pyproject.toml"), "");
+    fs.writeFileSync(path.join(tmpRoot, "requirements.txt"), "");
+    fs.writeFileSync(path.join(tmpRoot, "Cargo.toml"), "");
+    fs.writeFileSync(path.join(tmpRoot, "go.mod"), "");
+    fs.writeFileSync(path.join(tmpRoot, "Gemfile"), "");
+    const first = await prepareEnvironment({ cwd: tmpRoot });
+    const second = await prepareEnvironment({ cwd: tmpRoot });
+    expect(first.detectedKinds).toEqual(["python", "rust", "go", "ruby"]);
+    expect(second).toEqual(first);
+  });
+
+  it("treats an unreadable marker as absent", async () => {
+    const spy = vi.spyOn(fs, "existsSync").mockImplementation(() => {
+      throw new Error("eacces");
+    });
+    const result = await prepareEnvironment({ cwd: tmpRoot });
+    expect(result).toMatchObject({ ok: true, detectedKinds: ["unknown"] });
+    spy.mockRestore();
   });
 
   it("does not run any repository script or install anything", async () => {

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -74,5 +74,53 @@ describe("llm-stats", () => {
 
     const meta = toLlmUsageMeta(stats);
     expect(meta.pacing?.rateLimitHits.cursor_sdk).toBeGreaterThanOrEqual(1);
+  });
+
+  it("returns an empty store for a missing, corrupt, or non-object file", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "imemory-llm-stats-"));
+    expect((await loadLlmStats(path.join(dir, "missing.json"))).byLlm).toEqual({});
+
+    const bad = path.join(dir, "bad.json");
+    await writeFile(bad, "{", "utf8");
+    expect((await loadLlmStats(bad)).byLlm).toEqual({});
+
+    const arrayFile = path.join(dir, "array.json");
+    await writeFile(arrayFile, JSON.stringify({ byLlm: [], updatedAt: "x" }), "utf8");
+    expect((await loadLlmStats(arrayFile)).byLlm).toEqual({});
+  });
+
+  it("floors a legacy numeric count and keeps accumulating across months", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "imemory-llm-stats-"));
+    const filePath = path.join(dir, "usage.json");
+    await writeFile(
+      filePath,
+      JSON.stringify({ updatedAt: "2026-01-01T00:00:00.000Z", byLlm: { "cursor_cli/default": 1.9 } }),
+      "utf8",
+    );
+    const january = await recordLlmUsage({
+      runner: "cursor_cli",
+      model: null,
+      filePath,
+      now: new Date("2026-01-31T23:00:00.000Z"),
+      syncPacing: false,
+    });
+    expect(january.byLlm["cursor_cli/default"]?.count).toBe(2);
+
+    const february = await recordLlmUsage({
+      runner: "cursor_cli",
+      model: null,
+      filePath,
+      now: new Date("2026-02-01T00:30:00.000Z"),
+      syncPacing: false,
+    });
+    expect(february.byLlm["cursor_cli/default"]?.count).toBe(3);
+    expect(february.byLlm["cursor_cli/default"]?.lastUsedAt).toBe("2026-02-01T00:30:00.000Z");
+  });
+
+  it("omits pacing metadata when nothing has been recorded", () => {
+    resetProviderPacing();
+    const meta = toLlmUsageMeta({ updatedAt: new Date(0).toISOString(), byLlm: {} });
+    expect(meta.byLlm).toEqual({});
+    expect(meta.pacing).toBeUndefined();
   });
 });

@@ -68,7 +68,7 @@ const DEFAULT_MCP_URL = "http://localhost:8080/api/mcp";
 const DEFAULT_HEARTBEAT_MS = 60_000;
 const DEFAULT_JOB_POLL_MS = 5_000;
 
-function buildMcpUrl(baseUrl: string, projectSlug?: string): URL {
+export function buildMcpUrl(baseUrl: string, projectSlug?: string): URL {
   const url = new URL(normalizeMcpBaseUrl(baseUrl));
   if (projectSlug && !url.searchParams.has("projectSlug")) {
     url.searchParams.set("projectSlug", projectSlug);
@@ -76,7 +76,7 @@ function buildMcpUrl(baseUrl: string, projectSlug?: string): URL {
   return url;
 }
 
-function parseIntervalMs(raw: string | undefined, fallback: number, min: number): number {
+export function parseIntervalMs(raw: string | undefined, fallback: number, min: number): number {
   if (!raw?.trim()) return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value) || value < min) {
@@ -162,7 +162,7 @@ async function reportHeartbeat(
  * no extra polling channel is needed. Skips (and retries on the next heartbeat) while a job
  * is running so it never contends with task execution.
  */
-async function maybeRunHealthCheck(
+export async function maybeRunHealthCheck(
   client: Client,
   agentMeta: Record<string, unknown> | null,
   agentKey: string,
@@ -655,7 +655,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+if (!process.env.VITEST) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

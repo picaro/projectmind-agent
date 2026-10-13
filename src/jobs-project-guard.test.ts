@@ -54,6 +54,29 @@ describe("assertCwdMatchesJobProject", () => {
     ).resolves.toEqual({ ok: true });
   });
 
+  it("allows when the lookup returns an empty project id", async () => {
+    callToolJson.mockResolvedValue({ projectId: "  ", name: "Nobody" });
+    await expect(
+      assertCwdMatchesJobProject({} as never, {
+        project_id: "proj-a",
+        local_directory: "/Users/me/alpha",
+      }),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it("names the linked project without a slug", async () => {
+    callToolJson.mockResolvedValue({ projectId: "proj-other", name: "Other" });
+    const result = await assertCwdMatchesJobProject({} as never, {
+      project_id: "proj-a",
+      local_directory: "/Users/me/alpha",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("Other");
+      expect(result.reason).not.toContain("()");
+    }
+  });
+
   it("continues with warning when lookup fails for other reasons", async () => {
     callToolJson.mockRejectedValue(new Error("network down"));
     const result = await assertCwdMatchesJobProject({} as never, {

@@ -1,5 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { isClaudeUsageClose, parseClaudeUsageText } from "./claude-usage.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  getClaudeUsageSnapshot,
+  isClaudeUsageClose,
+  parseClaudeUsageText,
+  resetClaudeUsageCache,
+  runClaudeUsageCheck,
+} from "./claude-usage.js";
+
+function writeCommand(body: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pm-claude-usage-"));
+  const command = path.join(dir, "claude");
+  fs.writeFileSync(command, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return command;
+}
 
 describe("claude-usage", () => {
   it("parses session and week usage percentages and reset times", () => {
@@ -48,5 +64,55 @@ describe("claude-usage", () => {
       ),
     ).toBe(false);
     expect(isClaudeUsageClose(null, 90)).toBe(false);
+    expect(
+      isClaudeUsageClose(
+        { checkedAt: "", note: "", sessionPercent: 90, sessionResetsAt: null, weekPercent: 0, weekResetsAt: null },
+        90,
+      ),
+    ).toBe(true);
+    expect(
+      isClaudeUsageClose(
+        { checkedAt: "", note: "", sessionPercent: 0, sessionResetsAt: null, weekPercent: 0, weekResetsAt: null },
+        90,
+      ),
+    ).toBe(false);
   });
+
+  it("returns null when the usage command fails, is empty, or is not JSON", async () => {
+    await expect(runClaudeUsageCheck({ command: writeCommand("exit 1"), timeoutMs: 5_000 })).resolves.toBeNull();
+    await expect(
+      runClaudeUsageCheck({ command: writeCommand("echo '{\"result\":\"\"}'"), timeoutMs: 5_000 }),
+    ).resolves.toBeNull();
+    await expect(
+      runClaudeUsageCheck({ command: writeCommand("echo 'not-json'"), timeoutMs: 5_000 }),
+    ).resolves.toBeNull();
+  });
+
+  it("parses a successful usage command", async () => {
+    const command = writeCommand(
+      `echo '{"result":"Current session: 0% used. Current week (all models): 4% used"}'`,
+    );
+    const snapshot = await runClaudeUsageCheck({ command, timeoutMs: 5_000 });
+    expect(snapshot?.sessionPercent).toBe(0);
+    expect(snapshot?.weekPercent).toBe(4);
+  });
+
+  it("reuses a cached snapshot inside the minimum interval", async () => {
+    resetClaudeUsageCache();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pm-claude-usage-"));
+    const counter = path.join(dir, "count");
+    const command = writeCommand(
+      `echo x >> '${counter.replace(/'/g, `'\\''`)}'\necho '{"result":"Current session: 1% used"}'`,
+    );
+    const first = await getClaudeUsageSnapshot({ command, minIntervalMs: 60_000, timeoutMs: 5_000 });
+    const second = await getClaudeUsageSnapshot({ command, minIntervalMs: 60_000, timeoutMs: 5_000 });
+    expect(first?.sessionPercent).toBe(1);
+    expect(second?.sessionPercent).toBe(1);
+    expect(fs.readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(1);
+    resetClaudeUsageCache();
+  });
+});
+
+afterEach(() => {
+  resetClaudeUsageCache();
 });

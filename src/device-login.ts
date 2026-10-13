@@ -28,7 +28,7 @@ function originFromMcpUrl(mcpUrl: string): string {
   return new URL(normalizeMcpBaseUrl(mcpUrl)).origin;
 }
 
-function upsertEnvVar(content: string, key: string, value: string): string {
+export function upsertEnvVar(content: string, key: string, value: string): string {
   const line = `${key}=${value}`;
   const re = new RegExp(`^${key}=.*$`, "m");
   if (re.test(content)) return content.replace(re, line);

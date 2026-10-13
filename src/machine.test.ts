@@ -62,7 +62,12 @@ describe("machine", () => {
     ).toBe("host=Olegs-MacBook-Pro at 2026-07-17T23:22:00.000Z");
   });
 
-  it("normalizeMcpBaseUrl strips trailing slashes", () => {
+  it("normalizeMcpBaseUrl trims and strips trailing slashes", () => {
+    expect(normalizeMcpBaseUrl("")).toBe("");
+    expect(normalizeMcpBaseUrl("  https://projectm.dev/api/mcp/  ")).toBe(
+      "https://projectm.dev/api/mcp",
+    );
+    expect(normalizeMcpBaseUrl("http://localhost:8080")).toBe("http://localhost:8080");
     expect(normalizeMcpBaseUrl("https://projectm.dev/")).toBe("https://projectm.dev");
     expect(normalizeMcpBaseUrl("https://projectm.dev///")).toBe("https://projectm.dev");
     expect(normalizeMcpBaseUrl("http://localhost:8080/api/mcp")).toBe(

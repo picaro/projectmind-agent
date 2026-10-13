@@ -79,6 +79,36 @@ describe("agent-version", () => {
     ).toBe("9.9.9");
   });
 
+  it("compares prefixes, unequal lengths, and stripped pre-release tags", () => {
+    expect(compareSemver("v1.2.3", "1.2.3")).toBe(0);
+    expect(compareSemver("1", "1.0.0")).toBe(0);
+    expect(compareSemver("1.0.0-beta", "1.0.0")).toBe(0);
+    expect(compareSemver("1.0.0+build.1", "1.0.0")).toBe(0);
+    expect(compareSemver("", "0")).toBe(0);
+    expect(compareSemver("1.2.x", "1.2.0")).toBe(0);
+    expect(compareSemver("..", "0.0.0")).toBe(0);
+    expect(isNewerVersion("1.2.0", "v1.1.9")).toBe(true);
+  });
+
+  it("reads a version from installDir and skips a package.json without a string version", async () => {
+    const previous = process.env.IMEMORY_AGENT_EMBEDDED_VERSION;
+    delete process.env.IMEMORY_AGENT_EMBEDDED_VERSION;
+    try {
+      const dir = await mkdtemp(join(tmpdir(), "pm-agent-version-"));
+      await writeFile(join(dir, "package.json"), JSON.stringify({ version: "  4.5.6  " }), "utf8");
+      expect(getAgentVersion({ installDir: dir, env: {} as NodeJS.ProcessEnv })).toBe("4.5.6");
+
+      const broken = await mkdtemp(join(tmpdir(), "pm-agent-version-"));
+      await writeFile(join(broken, "package.json"), JSON.stringify({ version: 3 }), "utf8");
+      const fromCwd = getAgentVersion({ installDir: broken, env: {} as NodeJS.ProcessEnv });
+      expect(fromCwd).toMatch(/^\d+\.\d+\.\d+/);
+      expect(fromCwd).not.toBe("3");
+    } finally {
+      if (previous === undefined) delete process.env.IMEMORY_AGENT_EMBEDDED_VERSION;
+      else process.env.IMEMORY_AGENT_EMBEDDED_VERSION = previous;
+    }
+  });
+
   it("normalizes an embedded build date and rejects invalid values", () => {
     expect(
       getAgentBuildDate({
@@ -89,6 +119,10 @@ describe("agent-version", () => {
       getAgentBuildDate({
         IMEMORY_AGENT_EMBEDDED_BUILD_DATE: "not-a-date",
       } as NodeJS.ProcessEnv),
+    ).toBeNull();
+    expect(getAgentBuildDate({} as NodeJS.ProcessEnv)).toBeNull();
+    expect(
+      getAgentBuildDate({ IMEMORY_AGENT_EMBEDDED_BUILD_DATE: "  " } as NodeJS.ProcessEnv),
     ).toBeNull();
   });
 });
