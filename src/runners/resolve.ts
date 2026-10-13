@@ -331,6 +331,16 @@ export async function resolveAutoRunnerChain(
 }
 
 /**
+ * `llm_api` only works with a gateway grant. Without one, drop it from a cascade
+ * so the next runner gets the job; a lone pin stays so it fails with a clear error.
+ */
+export function dropUngrantedGatewayRunner<T extends string>(attempts: T[], hasGrant: boolean): T[] {
+  if (hasGrant || attempts.length <= 1) return attempts;
+  const rest = attempts.filter((name) => name !== "llm_api");
+  return rest.length > 0 ? rest : attempts;
+}
+
+/**
  * Build a runner by name. `modelOverride` (job- or agent-configured model, from the
  * server) takes priority over the runner's local env-var default when non-empty.
  */
@@ -348,12 +358,22 @@ export function createRunnerByName(
 ): Runner {
   const override = safeConfiguredModel(modelOverride);
 
-  if ((name === "openrouter" || name === "tokenrouter") && gatewayGrant?.gateway?.token) {
+  if (
+    (name === "openrouter" || name === "tokenrouter" || name === "llm_api") &&
+    gatewayGrant?.gateway?.token
+  ) {
     return createGatewayRunner({
       name,
       executionId: gatewayGrant.executionId,
       gateway: gatewayGrant.gateway,
     });
+  }
+
+  // There is no direct-to-provider fallback: the provider key stays on the server.
+  if (name === "llm_api") {
+    throw new Error(
+      "llm_api runner requires a ProjectMind gateway grant from the claim response",
+    );
   }
 
   if (name === "openrouter") {
@@ -580,6 +600,7 @@ export async function resolveRunnerAttempts(
     "kimi_cli",
     "openrouter",
     "tokenrouter",
+    "llm_api",
   ];
 
   if (explicitRunners.includes(runner)) {

@@ -1,5 +1,7 @@
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import {
+  createRunnerByName,
+  dropUngrantedGatewayRunner,
   isRetryableRunnerFailure,
   resolveAutoRunnerChain,
   resolveAutoRunnerChainWithDiagnostics,
@@ -152,6 +154,52 @@ describe("resolveAutoRunnerChain", () => {
       llmApiKey: "",
     });
     expect(chain).toEqual([]);
+  });
+});
+
+describe("llm_api gateway runner", () => {
+  const gateway = {
+    baseUrl: "https://projectm.example",
+    completionsPath: "/api/executions/job-1/llm/completions",
+    token: "grant-token",
+    expiresAt: "2099-01-01T00:00:00Z",
+  };
+
+  it("uses the gateway runner when the claim carries a grant", () => {
+    const runner = createRunnerByName("llm_api", null, { executionId: "job-1", gateway });
+    expect(runner.name).toBe("llm_api");
+  });
+
+  it("refuses to run without a grant instead of reaching a provider directly", () => {
+    expect(() => createRunnerByName("llm_api", null, null)).toThrow(/gateway grant/);
+  });
+
+  it("is an explicit runner with the auto cascade behind it", async () => {
+    const deps = {
+      cursorKey: "",
+      cursorBin: "agent",
+      codexBin: "codex",
+      antigravityBin: "agy",
+      claudeBin: "claude",
+      copilotBin: "copilot",
+      openRouterKey: "",
+      tokenRouterKey: "",
+      commandExists: async (cmd: string) => cmd === "claude",
+    };
+    expect(await resolveRunnerAttempts("llm_api", deps, { hardRule: true })).toEqual(["llm_api"]);
+    expect(await resolveRunnerAttempts("llm_api", deps, { hardRule: false })).toEqual([
+      "llm_api",
+      "claude_cli",
+    ]);
+  });
+
+  it("drops llm_api from a cascade without a grant but keeps a lone pin", () => {
+    expect(dropUngrantedGatewayRunner(["llm_api", "claude_cli"], false)).toEqual(["claude_cli"]);
+    expect(dropUngrantedGatewayRunner(["llm_api", "claude_cli"], true)).toEqual([
+      "llm_api",
+      "claude_cli",
+    ]);
+    expect(dropUngrantedGatewayRunner(["llm_api"], false)).toEqual(["llm_api"]);
   });
 });
 

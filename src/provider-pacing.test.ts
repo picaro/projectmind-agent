@@ -32,6 +32,7 @@ const baseConfig = (): ProviderPacingConfig => ({
     copilot_cli: 10,
     openrouter: 10,
     tokenrouter: 10,
+    llm_api: 10,
   },
   preferAuthenticated: true,
 });

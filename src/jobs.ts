@@ -44,6 +44,7 @@ import { prepareEnvironment } from "./environment-manager.js";
 import { errorCodeForPhase, reportPhase, type ExecutionLifecyclePhase } from "./execution-phase.js";
 import {
   createRunnerByName,
+  dropUngrantedGatewayRunner,
   handleRunnerResult,
   isRetryableRunnerFailure,
   resolveRunnerAttempts,
@@ -907,7 +908,10 @@ export async function executeClaimedJob(
       }
       const requested = job.runner || "auto";
       const hardRule = Boolean(job.hard_rule || improvementContract?.hardRule);
-      const rawAttempts = await resolveRunnerAttempts(requested, undefined, { hardRule });
+      const rawAttempts = dropUngrantedGatewayRunner(
+        await resolveRunnerAttempts(requested, undefined, { hardRule }),
+        Boolean(modelGateway?.token),
+      );
       // Reorder only for multi-runner cascades; explicit pins stay fixed.
       const { available: attempts, skipped } = planAttempts(rawAttempts as ProviderName[], {
         rotate: rawAttempts.length > 1,

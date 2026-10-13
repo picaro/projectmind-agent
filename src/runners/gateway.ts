@@ -60,7 +60,7 @@ function completionsUrl(gateway: ExecutionModelGateway, executionId: string): st
 
 export function createGatewayRunner(options: {
   /** Kept so job history, cooldowns, and stats keep their existing labels. */
-  name: "openrouter" | "tokenrouter";
+  name: "openrouter" | "tokenrouter" | "llm_api";
   executionId: string;
   gateway: ExecutionModelGateway;
   maxSteps?: number;

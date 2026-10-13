@@ -60,6 +60,7 @@ const DEFAULT_MAX_RPM: Record<ProviderName, number> = {
   copilot_cli: 6,
   openrouter: 10,
   tokenrouter: 10,
+  llm_api: 10,
 };
 
 const MAX_PACING_EVENTS = 40;
