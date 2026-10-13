@@ -11,9 +11,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import {
+  CONTINUOUS_TEST_INLINE_ARTIFACT_MAX_BYTES,
   CONTINUOUS_TEST_PROTOCOL_TOOLS as TOOLS,
   continuousTestJobPayloadSchema,
   type ClaimContinuousTestRunResponse,
+  type CreateContinuousTestArtifactUploadResponse,
   type ContinuousTestAgentOutcome,
   type ContinuousTestCompletion,
   type ContinuousTestJobPayload,
@@ -34,9 +36,16 @@ import {
   readPlaywrightReport,
   reportHasFailures,
   secretEnvValues,
-  selectFailureAttachments,
+  selectRunAttachments,
+  type RunAttachment,
   summarizeError,
 } from "./continuous-test-report.js";
+import {
+  captureArgv,
+  findPlaywrightConfig,
+  listArgv,
+  writeCaptureWrapper,
+} from "./continuous-test-capture.js";
 import {
   checkTargetReachable,
   continuousTestStateRoot,
@@ -426,6 +435,7 @@ export class ContinuousTestRun {
       if (!errorSummary && this.abortReason) errorSummary = this.abortMessage();
 
       let sendReport: Record<string, unknown> | undefined;
+      let wantsUpload = false;
       if (report) {
         const prepared = prepareReportForUpload(report, this.secrets);
         if (prepared.ok) {
@@ -434,13 +444,17 @@ export class ContinuousTestRun {
           errorSummary = prepared.reason;
           if (outcome === "completed") outcome = "infra_error";
         }
-        if (
+        wantsUpload =
           (outcome === "completed" || outcome === "timed_out") &&
-          reportHasFailures(report) &&
-          p.artifacts.maxFiles > 0
-        ) {
-          summary.artifactsUploaded = await this.uploadArtifacts(report);
-        }
+          (reportHasFailures(report) || p.artifacts.passing !== undefined) &&
+          p.artifacts.maxFiles > 0;
+      }
+      // A server that sends `capture` accepts uploads shortly after completion:
+      // report the verdict first so a long upload cannot push the run past its
+      // deadline. Older servers only accept uploads while the run is active.
+      const uploadAfterComplete = p.artifacts.capture !== undefined;
+      if (wantsUpload && report && !uploadAfterComplete) {
+        summary.artifactsUploaded = await this.uploadArtifacts(report);
       }
 
       summary.outcome = outcome;
@@ -456,6 +470,12 @@ export class ContinuousTestRun {
         errorSummary: summary.errorSummary,
         durationMs: Math.max(0, Math.round(this.deps.now() - this.startedAt)),
       });
+      if (wantsUpload && report && uploadAfterComplete && summary.completed) {
+        // The run is terminal now; heartbeats would only answer lease_lost.
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = null;
+        summary.artifactsUploaded = await this.uploadArtifacts(report);
+      }
       return summary;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -522,8 +542,9 @@ export class ContinuousTestRun {
       },
       p.command.env,
     );
-    this.log(`spawning ${p.command.argv.slice(0, 3).join(" ")} (grep ${p.grep}) in ${cwd}`);
-    const proc = this.deps.spawn([...p.command.argv], { cwd, env });
+    const argv = await this.captureArgvFor(cwd, env);
+    this.log(`spawning ${argv.slice(0, 3).join(" ")} (grep ${p.grep}) in ${cwd}`);
+    const proc = this.deps.spawn(argv, { cwd, env });
     this.current = proc;
     this.writeState(proc.pid ?? null);
     if (this.abortReason && !this.terminating) {
@@ -541,34 +562,139 @@ export class ContinuousTestRun {
     }
   }
 
+  /**
+   * The run's argv, wrapped so Playwright records what the server asked for.
+   * Falls back to the project's own config when there is none, the command
+   * already names one, or the wrapper fails to load (`--list` preflight).
+   */
+  private async captureArgvFor(cwd: string, env: Record<string, string>): Promise<string[]> {
+    const argv = [...this.payload.command.argv];
+    const capture = this.payload.artifacts.capture;
+    if (!capture || this.abortReason) return argv;
+    const base = findPlaywrightConfig(cwd);
+    if (!base) {
+      this.log("capture: no playwright.config.* in the test workspace; using the project's settings");
+      return argv;
+    }
+    let wrapped: string[];
+    try {
+      wrapped = captureArgv(argv, writeCaptureWrapper(base, capture));
+    } catch (err) {
+      this.log(`capture: could not write wrapper (${err instanceof Error ? err.message : String(err)})`);
+      return argv;
+    }
+    if (wrapped.length === argv.length) return argv;
+    const preflight = this.deps.spawn(listArgv(wrapped), { cwd, env });
+    this.current = preflight;
+    const timer = setTimeout(() => preflight.killGroup("SIGKILL"), 60_000);
+    try {
+      const exit = await preflight.exited;
+      if (exit.code === 0) {
+        this.log(`capture: screenshot=${capture.screenshot} video=${capture.video} trace=${capture.trace}`);
+        return wrapped;
+      }
+      const tail = (preflight.stderrTail() || preflight.stdoutTail()).trim().split("\n").slice(-3).join(" ");
+      this.log(`capture unavailable (wrapper did not load): ${summarizeError(tail, this.secrets)}`);
+      return argv;
+    } finally {
+      clearTimeout(timer);
+      if (!preflight.hasExited()) preflight.killGroup("SIGKILL");
+      this.current = null;
+    }
+  }
+
   private async uploadArtifacts(report: Record<string, unknown>): Promise<number> {
     const p = this.payload;
-    const picked = selectFailureAttachments(report, this.paths.worktree, {
+    const picked = selectRunAttachments(report, this.paths.worktree, {
       maxFiles: p.artifacts.maxFiles,
       maxBytesPerFile: p.artifacts.maxBytesPerFile,
+      maxTotalBytes: p.artifacts.maxTotalBytes,
+      passing: p.artifacts.passing,
     });
+    // Without `capture` the server predates direct uploads and result statuses.
+    const modern = p.artifacts.capture !== undefined;
+    const inlineMax = Math.min(
+      p.artifacts.inlineMaxBytes ?? CONTINUOUS_TEST_INLINE_ARTIFACT_MAX_BYTES,
+      CONTINUOUS_TEST_INLINE_ARTIFACT_MAX_BYTES,
+    );
+    let directAvailable = modern;
     let uploaded = 0;
     for (const att of picked) {
+      if (this.abortReason === "shutdown") break;
       try {
         const content = fs.readFileSync(att.path);
-        await this.deps.call(TOOLS.uploadContinuousTestArtifact, {
-          runId: p.runId,
-          leaseId: p.leaseId,
-          agentKey: this.deps.agentKey,
-          kind: att.kind,
-          name: att.name,
-          mime: att.mime,
-          contentBase64: content.toString("base64"),
-          testTitle: summarizeError(att.testTitle, this.secrets).slice(0, 300),
-        });
+        if (directAvailable && content.length > inlineMax) {
+          const done = await this.uploadDirect(att, content);
+          if (done === "inline-only") {
+            directAvailable = false;
+            this.log(`artifact ${att.name} skipped: server takes only small inline uploads`);
+            continue;
+          }
+        } else {
+          if (content.length > inlineMax) {
+            this.log(`artifact ${att.name} skipped: ${content.length} bytes is over the inline limit`);
+            continue;
+          }
+          await this.deps.call(TOOLS.uploadContinuousTestArtifact, {
+            ...this.artifactFields(att),
+            contentBase64: content.toString("base64"),
+          });
+        }
         uploaded += 1;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.log(`artifact ${att.name} not uploaded: ${summarizeError(message, this.secrets)}`);
-        if (/limit reached|Lease not held|before completing/i.test(message)) break;
+        if (/limit reached|Lease not held|before completing|window .*closed/i.test(message)) break;
       }
     }
     return uploaded;
+  }
+
+  private artifactFields(att: RunAttachment): Record<string, unknown> {
+    const p = this.payload;
+    return {
+      runId: p.runId,
+      leaseId: p.leaseId,
+      agentKey: this.deps.agentKey,
+      kind: att.kind,
+      name: att.name,
+      mime: att.mime,
+      testTitle: summarizeError(att.testTitle, this.secrets).slice(0, 300),
+      ...(p.artifacts.capture !== undefined ? { resultStatus: att.resultStatus } : {}),
+    };
+  }
+
+  /** Reserve → PUT straight to storage → finalize. */
+  private async uploadDirect(att: RunAttachment, content: Buffer): Promise<"ok" | "inline-only"> {
+    const res = await this.deps.call<CreateContinuousTestArtifactUploadResponse>(
+      TOOLS.createContinuousTestArtifactUpload,
+      { ...this.artifactFields(att), sizeBytes: content.length },
+    );
+    if (!res.upload || !res.artifactId) return "inline-only";
+    const url = new URL(res.upload.url);
+    if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      throw new Error("refusing a non-https upload URL");
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5 * 60_000);
+    try {
+      const put = await this.deps.fetchImpl(url, {
+        method: "PUT",
+        headers: res.upload.headers,
+        body: new Uint8Array(content),
+        signal: controller.signal,
+      });
+      if (!put.ok) throw new Error(`upload PUT failed (${put.status})`);
+    } finally {
+      clearTimeout(timer);
+    }
+    await this.deps.call(TOOLS.finalizeContinuousTestArtifactUpload, {
+      runId: this.payload.runId,
+      leaseId: this.payload.leaseId,
+      agentKey: this.deps.agentKey,
+      artifactId: res.artifactId,
+    });
+    return "ok";
   }
 
   private async complete(body: ContinuousTestCompletion): Promise<boolean> {

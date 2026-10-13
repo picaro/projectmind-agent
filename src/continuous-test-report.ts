@@ -10,6 +10,7 @@ import {
   CONTINUOUS_TEST_MAX_ERROR_SUMMARY_CHARS,
   CONTINUOUS_TEST_MAX_REPORT_BYTES,
   type ContinuousTestArtifactKind,
+  type ContinuousTestArtifactResultStatus,
 } from "./improvement-contracts/continuous-test-job.js";
 import { redactSecrets } from "./redact.js";
 
@@ -103,6 +104,11 @@ export type FailureAttachment = {
   testTitle: string;
 };
 
+export type RunAttachment = FailureAttachment & {
+  sizeBytes: number;
+  resultStatus: ContinuousTestArtifactResultStatus;
+};
+
 type Visit = (test: JsonRecord, result: JsonRecord, title: string) => void;
 
 function walkResults(report: JsonRecord, visit: Visit): void {
@@ -152,57 +158,115 @@ const KIND_BY_MIME: Record<string, FailureAttachment["kind"]> = {
 /** Names that may hold cookies/session state — never uploaded. */
 const SENSITIVE_ATTACHMENT = /storage-?state|\.env\b|\.har$|cookie|auth|credential|secret/i;
 
-const KIND_PRIORITY: Record<FailureAttachment["kind"], number> = { screenshot: 0, trace: 1, video: 2 };
+const KIND_PRIORITY: Record<FailureAttachment["kind"], number> = { screenshot: 0, video: 1, trace: 2 };
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = path.relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
+const RESULT_STATUSES: readonly string[] = ["passed", "failed", "timedOut", "interrupted"];
+
+/** Setup/auth projects and files can show logged-in state; their passing media is never uploaded. */
+function isSetupTest(test: JsonRecord, title: string): boolean {
+  const project = typeof test.projectName === "string" ? test.projectName : "";
+  return /(^|[-_\s])(setup|auth)([-_\s]|$)/i.test(project) || /\.setup\.[cm]?[jt]sx?\b/i.test(title);
+}
+
 /**
- * Failure evidence from failed/timed-out results, restricted to files inside
- * the run workspace (a report can name any path) and ordered screenshots →
- * traces → videos so the most useful evidence fits within `maxFiles`.
+ * Media to upload for a run, restricted to files inside the run workspace (a
+ * report can name any path). Failed tests come first (screenshot → video →
+ * trace, from their last failed attempt), then — when `passing` asks for it —
+ * passing tests (screenshot → video). Bounded by `maxFiles`, `maxBytesPerFile`
+ * and `maxTotalBytes`.
  */
-export function selectFailureAttachments(
+export function selectRunAttachments(
   report: JsonRecord,
   workspaceRoot: string,
-  limits: { maxFiles: number; maxBytesPerFile: number },
-): FailureAttachment[] {
+  limits: {
+    maxFiles: number;
+    maxBytesPerFile: number;
+    maxTotalBytes?: number;
+    passing?: { screenshot: boolean; video: boolean };
+  },
+): RunAttachment[] {
   let realRoot: string;
   try {
     realRoot = fs.realpathSync(workspaceRoot);
   } catch {
     return [];
   }
-  const picked: FailureAttachment[] = [];
+  const failed: RunAttachment[][] = [];
+  const passing: RunAttachment[][] = [];
   const seen = new Set<string>();
-  walkResults(report, (_test, result, title) => {
-    if (result.status === "passed" || result.status === "skipped") return;
+  // One entry per test: the last failed attempt, or the last attempt when it passed.
+  const lastAttempt = new Map<JsonRecord, { result: JsonRecord; title: string }>();
+  walkResults(report, (test, result, title) => {
+    if (result.status === "skipped") return;
+    const prev = lastAttempt.get(test);
+    const failedNow = result.status !== "passed";
+    if (!prev || failedNow || prev.result.status === "passed") lastAttempt.set(test, { result, title });
+  });
+  for (const [test, { result, title }] of lastAttempt) {
+    const status = String(result.status);
+    const resultStatus = (RESULT_STATUSES.includes(status) ? status : "failed") as RunAttachment["resultStatus"];
+    const isPassing = resultStatus === "passed";
+    if (isPassing && (!limits.passing || isSetupTest(test, title))) continue;
+    const files: RunAttachment[] = [];
     for (const raw of asArray(result.attachments)) {
       const att = asRecord(raw);
       const mime = typeof att?.contentType === "string" ? att.contentType : "";
       const filePath = typeof att?.path === "string" ? att.path : "";
       const kind = KIND_BY_MIME[mime];
       if (!kind || !filePath) continue;
+      if (isPassing && (kind === "trace" || !limits.passing?.[kind])) continue;
       const name = path.basename(filePath);
       if (SENSITIVE_ATTACHMENT.test(name) || SENSITIVE_ATTACHMENT.test(String(att?.name ?? ""))) continue;
       let real: string;
+      let size: number;
       try {
         real = fs.realpathSync(path.resolve(realRoot, filePath));
         const stat = fs.statSync(real);
         if (!stat.isFile() || stat.size === 0 || stat.size > limits.maxBytesPerFile) continue;
+        size = stat.size;
       } catch {
         continue;
       }
       if (!isPathInside(realRoot, real) || seen.has(real)) continue;
       seen.add(real);
-      picked.push({ kind, name, mime, path: real, testTitle: title.slice(0, 300) });
+      files.push({ kind, name, mime, path: real, testTitle: title.slice(0, 300), sizeBytes: size, resultStatus });
     }
-  });
-  return picked
-    .sort((a, b) => KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind])
-    .slice(0, Math.max(0, limits.maxFiles));
+    files.sort((a, b) => KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind]);
+    if (files.length > 0) (isPassing ? passing : failed).push(files);
+  }
+  // Round-robin by kind so every failed test gets its screenshot before any test gets its trace.
+  const ordered: RunAttachment[] = [];
+  for (const groups of [failed, passing]) {
+    for (const kind of ["screenshot", "video", "trace"] as const) {
+      for (const files of groups) ordered.push(...files.filter((f) => f.kind === kind));
+    }
+  }
+  const picked: RunAttachment[] = [];
+  let total = 0;
+  const budget = limits.maxTotalBytes ?? Number.POSITIVE_INFINITY;
+  for (const file of ordered) {
+    if (picked.length >= Math.max(0, limits.maxFiles)) break;
+    if (total + file.sizeBytes > budget) continue;
+    picked.push(file);
+    total += file.sizeBytes;
+  }
+  return picked;
+}
+
+/** Failure evidence only (servers that predate `artifacts.passing`). */
+export function selectFailureAttachments(
+  report: JsonRecord,
+  workspaceRoot: string,
+  limits: { maxFiles: number; maxBytesPerFile: number },
+): FailureAttachment[] {
+  return selectRunAttachments(report, workspaceRoot, limits).map(
+    ({ sizeBytes: _s, resultStatus: _r, ...rest }) => rest,
+  );
 }
 
 function truncate(value: unknown, max: number): unknown {
