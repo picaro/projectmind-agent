@@ -17,11 +17,28 @@ export const CONTINUOUS_TEST_PROTOCOL_TOOLS = {
   claimContinuousTestRun: "claimContinuousTestRun",
   renewContinuousTestRunLease: "renewContinuousTestRunLease",
   uploadContinuousTestArtifact: "uploadContinuousTestArtifact",
+  createContinuousTestArtifactUpload: "createContinuousTestArtifactUpload",
+  finalizeContinuousTestArtifactUpload: "finalizeContinuousTestArtifactUpload",
   completeContinuousTestRun: "completeContinuousTestRun",
 } as const;
 
 export const CONTINUOUS_TEST_ENVIRONMENTS = ["production", "staging", "preview"] as const;
 export const CONTINUOUS_TEST_SUITES = ["smoke", "regression"] as const;
+
+/** Playwright `use` capture modes the server may ask the agent to force. */
+export const CONTINUOUS_TEST_SCREENSHOT_MODES = ["off", "on", "only-on-failure"] as const;
+export const CONTINUOUS_TEST_VIDEO_MODES = ["off", "on", "retain-on-failure"] as const;
+export const CONTINUOUS_TEST_TRACE_MODES = ["off", "retain-on-failure"] as const;
+
+/** Larger files use the direct upload; the MCP endpoint rejects bodies over 1 MiB. */
+export const CONTINUOUS_TEST_INLINE_ARTIFACT_MAX_BYTES = 700_000;
+
+export const continuousTestCaptureSchema = z.object({
+  screenshot: z.enum(CONTINUOUS_TEST_SCREENSHOT_MODES),
+  video: z.enum(CONTINUOUS_TEST_VIDEO_MODES),
+  trace: z.enum(CONTINUOUS_TEST_TRACE_MODES),
+});
+export type ContinuousTestCapture = z.infer<typeof continuousTestCaptureSchema>;
 
 export const continuousTestJobPayloadSchema = z.object({
   schemaVersion: z.literal(CONTINUOUS_TEST_CONTRACT_VERSION),
@@ -65,6 +82,14 @@ export const continuousTestJobPayloadSchema = z.object({
     maxFiles: z.number().int().nonnegative(),
     maxBytesPerFile: z.number().int().positive(),
     retainDays: z.number().int().positive(),
+    /*
+     * Optional within 1.0. Present only from servers that also accept direct
+     * uploads and uploads shortly after completion.
+     */
+    capture: continuousTestCaptureSchema.optional(),
+    passing: z.object({ screenshot: z.boolean(), video: z.boolean() }).optional(),
+    inlineMaxBytes: z.number().int().positive().optional(),
+    maxTotalBytes: z.number().int().positive().optional(),
   }),
 });
 
@@ -110,6 +135,20 @@ export type ContinuousTestLeaseRenewal = {
 
 export const CONTINUOUS_TEST_ARTIFACT_KINDS = ["screenshot", "trace", "video", "report"] as const;
 export type ContinuousTestArtifactKind = (typeof CONTINUOUS_TEST_ARTIFACT_KINDS)[number];
+
+/** Playwright result status of the attempt an artifact came from. */
+export const CONTINUOUS_TEST_ARTIFACT_RESULT_STATUSES = [
+  "passed",
+  "failed",
+  "timedOut",
+  "interrupted",
+] as const;
+export type ContinuousTestArtifactResultStatus =
+  (typeof CONTINUOUS_TEST_ARTIFACT_RESULT_STATUSES)[number];
+
+export type CreateContinuousTestArtifactUploadResponse =
+  | { artifactId: string; upload: { method: "PUT"; url: string; headers: Record<string, string> } }
+  | { artifactId: null; upload: null; reason: "inline-only" };
 
 /** Mime types the server accepts per artifact kind. */
 export const CONTINUOUS_TEST_ARTIFACT_MIME_BY_KIND: Record<

@@ -66,6 +66,7 @@ type Harness = {
   renew: (n: number) => Record<string, unknown>;
   playwright: PlaywrightBehavior;
   install: () => FakeProc;
+  list: () => FakeProc;
   logs: string[];
 };
 
@@ -210,6 +211,7 @@ beforeEach(() => {
       return exitedProc(0);
     },
     install: () => exitedProc(0),
+    list: () => exitedProc(0),
     deps: undefined as unknown as RunnerDeps,
   };
   let renewCount = 0;
@@ -246,6 +248,7 @@ beforeEach(() => {
         fs.mkdirSync(path.join(wt, "node_modules", ".bin"), { recursive: true });
         fs.writeFileSync(path.join(wt, "pnpm-lock.yaml"), "lockfileVersion: 9");
         fs.writeFileSync(path.join(wt, "node_modules", ".bin", "playwright"), "");
+        fs.writeFileSync(path.join(wt, "playwright.config.ts"), "export default {};\n");
         proc = exitedProc(0);
       } else if (argv[0] === "git" && argv[1] === "worktree" && argv[2] === "remove") {
         fs.rmSync(argv[4]!, { recursive: true, force: true });
@@ -254,6 +257,8 @@ beforeEach(() => {
         proc = exitedProc(0);
       } else if (argv[0] === "pnpm") {
         proc = h.install();
+      } else if (argv.includes("--list")) {
+        proc = h.list();
       } else {
         proc = h.playwright(opts);
       }
@@ -808,5 +813,171 @@ describe("helpers", () => {
     expect(continuousTestsEnabled({})).toBe(true);
     expect(continuousTestsEnabled({ IMEMORY_CONTINUOUS_TESTS: "0" })).toBe(false);
     expect(continuousTestsEnabled({ IMEMORY_CONTINUOUS_TESTS: "off" })).toBe(false);
+  });
+});
+
+describe("screenshots and video (servers that send artifacts.capture)", () => {
+  const modern = (extra: Partial<ContinuousTestJobPayload["artifacts"]> = {}) =>
+    payload({
+      artifacts: {
+        uploadOn: "failure",
+        maxFiles: 40,
+        maxBytesPerFile: 20_000_000,
+        retainDays: 7,
+        capture: { screenshot: "on", video: "on", trace: "retain-on-failure" },
+        passing: { screenshot: true, video: true },
+        inlineMaxBytes: 700_000,
+        maxTotalBytes: 150_000_000,
+        ...extra,
+      },
+    });
+
+  /** One failing test (screenshot + 1 MB video) and one passing test (screenshot + video). */
+  function mixedReport(worktree: string): Record<string, unknown> {
+    const dir = path.join(worktree, "test-results");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = (name: string, bytes: number) => {
+      const p = path.join(dir, name);
+      fs.writeFileSync(p, Buffer.alloc(bytes, 7));
+      return p;
+    };
+    const failShot = file("fail.png", 100);
+    const failVideo = file("fail.webm", 1_000_000);
+    const passShot = file("pass.png", 100);
+    const passVideo = file("pass.webm", 200);
+    const passTrace = file("pass-trace.zip", 100);
+    const setupShot = file("setup.png", 100);
+    const spec = (title: string, status: string, resultStatus: string, attachments: Array<[string, string]>, projectName = "chromium") => ({
+      title,
+      tests: [
+        {
+          status,
+          projectName,
+          results: [
+            { status: resultStatus, attachments: attachments.map(([contentType, p]) => ({ contentType, path: p })) },
+          ],
+        },
+      ],
+    });
+    return {
+      suites: [
+        {
+          title: "smoke.spec.ts",
+          specs: [
+            spec("checkout", "unexpected", "failed", [
+              ["video/webm", failVideo],
+              ["image/png", failShot],
+            ]),
+            spec("home", "expected", "passed", [
+              ["image/png", passShot],
+              ["video/webm", passVideo],
+              ["application/zip", passTrace],
+            ]),
+            spec("log in", "expected", "passed", [["image/png", setupShot]], "setup"),
+          ],
+        },
+      ],
+      errors: [],
+    };
+  }
+
+  let puts: Array<{ url: string; headers: Record<string, string>; bytes: number }>;
+
+  beforeEach(() => {
+    puts = [];
+    let n = 0;
+    const base = h.deps.call;
+    h.deps.call = (async (name: string, args: Record<string, unknown>) => {
+      if (name === "createContinuousTestArtifactUpload") {
+        h.calls.push({ name, args });
+        n += 1;
+        return {
+          artifactId: `art-${n}`,
+          upload: { method: "PUT", url: `https://storage.example/up/${n}`, headers: { "content-type": String(args.mime) } },
+        };
+      }
+      return base(name, args);
+    }) as RunnerDeps["call"];
+    h.deps.fetchImpl = (async (url: URL | string, init?: RequestInit) => {
+      if (init?.method !== "PUT") return new Response("ok", { status: 200 });
+      puts.push({
+        url: String(url),
+        headers: init?.headers as Record<string, string>,
+        bytes: (init?.body as Uint8Array).byteLength,
+      });
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    h.playwright = (opts) => {
+      writeReport(opts, mixedReport(worktreeOf()));
+      return exitedProc(1);
+    };
+  });
+
+  it("forces capture through a wrapper config, completes first, then uploads (large files directly)", async () => {
+    let wrapper = "";
+    h.list = () => {
+      wrapper = fs.readFileSync(path.join(worktreeOf(), "playwright.projectmind.config.ts"), "utf8");
+      return exitedProc(0);
+    };
+    const summary = await new ContinuousTestRun(modern(), h.deps).done;
+    expect(summary).toMatchObject({ outcome: "completed", completed: true, artifactsUploaded: 4 });
+
+    expect(wrapper).toContain('import loaded from "./playwright.config.ts"');
+    expect(wrapper).toContain('{"screenshot":"on","video":"on","trace":"retain-on-failure"}');
+    const runs = playwrightSpawns().filter((s) => !s.argv.includes("--list"));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.argv.slice(-2)).toEqual(["--config", path.join(worktreeOf(), "playwright.projectmind.config.ts")]);
+
+    const names = h.calls.map((c) => c.name).filter((n) => n !== "renewContinuousTestRunLease");
+    expect(names[0]).toBe("completeContinuousTestRun");
+
+    const uploads = h.calls.filter((c) =>
+      ["uploadContinuousTestArtifact", "createContinuousTestArtifactUpload"].includes(c.name),
+    );
+    // Failed test first (screenshot, then video), then passing media; never a passing trace or setup media.
+    expect(uploads.map((u) => [u.name, u.args.name, u.args.resultStatus])).toEqual([
+      ["uploadContinuousTestArtifact", "fail.png", "failed"],
+      ["createContinuousTestArtifactUpload", "fail.webm", "failed"],
+      ["uploadContinuousTestArtifact", "pass.png", "passed"],
+      ["uploadContinuousTestArtifact", "pass.webm", "passed"],
+    ]);
+    expect(uploads[1]!.args.sizeBytes).toBe(1_000_000);
+    expect(puts).toEqual([
+      { url: "https://storage.example/up/1", headers: { "content-type": "video/webm" }, bytes: 1_000_000 },
+    ]);
+    expect(h.calls.find((c) => c.name === "finalizeContinuousTestArtifactUpload")?.args).toMatchObject({
+      runId: RUN_ID,
+      leaseId: "lease-1",
+      artifactId: "art-1",
+    });
+  });
+
+  it("runs the project's own config when the wrapper does not load", async () => {
+    h.list = () => exitedProc(1, "", "SyntaxError: Cannot use import statement outside a module");
+    const summary = await new ContinuousTestRun(modern(), h.deps).done;
+    expect(summary.completed).toBe(true);
+    const runs = playwrightSpawns().filter((s) => !s.argv.includes("--list"));
+    expect(runs[0]!.argv).toEqual(payload().command.argv);
+    expect(h.logs.some((l) => l.includes("capture unavailable"))).toBe(true);
+  });
+
+  it("skips large files when the server only takes inline uploads", async () => {
+    const base = h.deps.call;
+    h.deps.call = (async (name: string, args: Record<string, unknown>) =>
+      name === "createContinuousTestArtifactUpload"
+        ? { artifactId: null, upload: null, reason: "inline-only" }
+        : base(name, args)) as RunnerDeps["call"];
+    const summary = await new ContinuousTestRun(modern(), h.deps).done;
+    expect(summary.artifactsUploaded).toBe(3);
+    expect(puts).toHaveLength(0);
+  });
+
+  it("older servers (no capture): failure evidence only, uploaded before completing, no wrapper", async () => {
+    const summary = await new ContinuousTestRun(payload(), h.deps).done;
+    expect(summary.artifactsUploaded).toBe(1);
+    expect(playwrightSpawns().some((s) => s.argv.includes("--list"))).toBe(false);
+    const names = h.calls.map((c) => c.name).filter((n) => n !== "renewContinuousTestRunLease");
+    expect(names).toEqual(["uploadContinuousTestArtifact", "completeContinuousTestRun"]);
+    expect(h.calls[h.calls.findIndex((c) => c.name === "uploadContinuousTestArtifact")]!.args.resultStatus).toBeUndefined();
   });
 });

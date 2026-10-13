@@ -115,7 +115,9 @@ async function reportHeartbeat(
   // exactly.
   meta.managedWorkspaceRoot = resolveManagedRoot();
   const continuousTests = continuousTestsEnabled();
-  meta.capabilities = { managedClone: true, continuousTests };
+  // continuousTestMedia: forces screenshot/video capture and uploads large
+  // files straight to storage (the control plane shows an "update" hint otherwise).
+  meta.capabilities = { managedClone: true, continuousTests, continuousTestMedia: continuousTests };
   // The control plane only targets idle-time browser tests at agents that set
   // this flag AND have the human "Allow Playwright" toggle on.
   meta[CONTINUOUS_TEST_AGENT_META_FLAG] = continuousTests;

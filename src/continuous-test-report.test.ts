@@ -9,6 +9,7 @@ import {
   scrubSecrets,
   secretEnvValues,
   selectFailureAttachments,
+  selectRunAttachments,
   summarizeError,
 } from "./continuous-test-report.js";
 
@@ -171,5 +172,66 @@ describe("selectFailureAttachments", () => {
 
   it("reportHasFailures is false for an all-green report", () => {
     expect(reportHasFailures(report([{ status: "passed" }], "expected"))).toBe(false);
+  });
+});
+
+describe("selectRunAttachments", () => {
+  it("failed tests first, passing media only when asked, never setup media or passing traces, within a byte budget", () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pm-ct-run-")));
+    try {
+      const write = (name: string, size: number) => {
+        const p = path.join(root, name);
+        fs.writeFileSync(p, Buffer.alloc(size, 1));
+        return p;
+      };
+      const att = (contentType: string, p: string) => ({ contentType, path: p });
+      const spec = (title: string, status: string, results: unknown[], projectName = "chromium") => ({
+        title,
+        tests: [{ status, projectName, results }],
+      });
+      const r = {
+        suites: [
+          {
+            title: "smoke.spec.ts",
+            specs: [
+              spec("a passes", "expected", [
+                { status: "passed", attachments: [att("image/png", write("a.png", 10)), att("video/webm", write("a.webm", 30)), att("application/zip", write("a.zip", 10))] },
+              ]),
+              spec("b flaky", "flaky", [
+                { status: "failed", attachments: [att("image/png", write("b-fail.png", 10)), att("application/zip", write("b.zip", 10))] },
+                { status: "passed", attachments: [att("image/png", write("b-pass.png", 10))] },
+              ]),
+              spec("c fails", "unexpected", [{ status: "timedOut", attachments: [att("video/webm", write("c.webm", 20)), att("image/png", write("c.png", 10))] }]),
+              spec("login", "expected", [{ status: "passed", attachments: [att("image/png", write("setup.png", 10))] }], "setup"),
+            ],
+          },
+        ],
+      };
+      const all = selectRunAttachments(r, root, {
+        maxFiles: 20,
+        maxBytesPerFile: 100,
+        passing: { screenshot: true, video: true },
+      });
+      expect(all.map((a) => [a.name, a.resultStatus])).toEqual([
+        ["b-fail.png", "failed"],
+        ["c.png", "timedOut"],
+        ["c.webm", "timedOut"],
+        ["b.zip", "failed"],
+        ["a.png", "passed"],
+        ["a.webm", "passed"],
+      ]);
+      expect(selectRunAttachments(r, root, { maxFiles: 20, maxBytesPerFile: 100 }).map((a) => a.name)).toEqual([
+        "b-fail.png",
+        "c.png",
+        "c.webm",
+        "b.zip",
+      ]);
+      // c.webm (20 bytes) no longer fits after the two screenshots; smaller files still do.
+      expect(
+        selectRunAttachments(r, root, { maxFiles: 20, maxBytesPerFile: 100, maxTotalBytes: 35 }).map((a) => a.name),
+      ).toEqual(["b-fail.png", "c.png", "b.zip"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
