@@ -45,7 +45,9 @@ export type RunnerName =
   | "claude_cli"
   | "copilot_cli"
   | "openrouter"
-  | "tokenrouter";
+  | "tokenrouter"
+  /** Catalog-routed model through the ProjectMind gateway; needs a claim-time grant. */
+  | "llm_api";
 
 export type Runner = {
   name: Exclude<RunnerName, "auto">;
