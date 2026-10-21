@@ -52,6 +52,39 @@ export function getActiveGitCredentials(): { username: string; token: string } |
   return activeGitCredentials;
 }
 
+const GIT_IDENTITY_ENV_KEYS = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+] as const;
+let savedIdentityEnv: Record<string, string | undefined> | null = null;
+
+/**
+ * Commit as the project's chosen author for the active job (claim `gitIdentity`).
+ * Set on process.env so git, gh and every runner CLI the job spawns inherit it;
+ * GIT_AUTHOR_* / GIT_COMMITTER_* override any user.name / user.email config.
+ * Passing null restores whatever the machine had before.
+ */
+export function setActiveGitIdentity(identity: { name: string; email: string } | null): void {
+  if (savedIdentityEnv) {
+    for (const key of GIT_IDENTITY_ENV_KEYS) {
+      const previous = savedIdentityEnv[key];
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+    savedIdentityEnv = null;
+  }
+  const name = identity?.name?.trim();
+  const email = identity?.email?.trim();
+  if (!name || !email) return;
+  savedIdentityEnv = Object.fromEntries(GIT_IDENTITY_ENV_KEYS.map((key) => [key, process.env[key]]));
+  process.env.GIT_AUTHOR_NAME = name;
+  process.env.GIT_AUTHOR_EMAIL = email;
+  process.env.GIT_COMMITTER_NAME = name;
+  process.env.GIT_COMMITTER_EMAIL = email;
+}
+
 export async function runGit(
   cwd: string,
   args: string[],

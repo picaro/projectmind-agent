@@ -68,6 +68,7 @@ vi.mock("./visual-capture.js", () => ({
 
 vi.mock("./git-publish.js", () => ({
   setActiveGitCredentials: (...args: unknown[]) => setActiveGitCredentials(...args),
+  setActiveGitIdentity: vi.fn(),
   commitAndPushAfterTask: (...args: unknown[]) => commitAndPushAfterTask(...args),
   ensurePullRequest: (...args: unknown[]) => ensurePullRequest(...args),
   shortCommitMessage: (summary: string) => summary.slice(0, 72),
