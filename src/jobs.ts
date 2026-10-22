@@ -3,6 +3,7 @@ import {
   commitAndPushAfterTask,
   ensurePullRequest,
   setActiveGitCredentials,
+  setActiveGitIdentity,
   shortCommitMessage,
 } from "./git-publish.js";
 import { getClaudeUsageSnapshot, isClaudeUsageClose } from "./claude-usage.js";
@@ -149,6 +150,11 @@ export type ClaimedJobPayload = {
    * it carries is advisory; the server re-enforces every limit per call.
    */
   modelGateway?: ExecutionModelGateway | null;
+  /**
+   * Project commit author: every commit of this job uses it as author and
+   * committer, whoever requested the job. Null/absent = this machine's git config.
+   */
+  gitIdentity?: { name: string; email: string } | null;
   cooldowns?: Array<{ runner: string; cooldown_until: string | null }>;
   delegation?: {
     allowed?: boolean;
@@ -219,6 +225,7 @@ export type ClaimedJobBundle = {
   repository: ClaimedJobPayload["repository"];
   managedWorkspace: ClaimedJobPayload["managedWorkspace"];
   gitCredentials: ClaimedJobPayload["gitCredentials"];
+  gitIdentity: ClaimedJobPayload["gitIdentity"];
   modelGateway: ClaimedJobPayload["modelGateway"];
   cooldowns?: ClaimedJobPayload["cooldowns"];
   delegation?: ClaimedJobPayload["delegation"];
@@ -235,6 +242,7 @@ function hydrateClaimedJob(payload: ClaimedJobPayload): ClaimedJobBundle | null 
     repository: payload.repository ?? null,
     managedWorkspace: payload.managedWorkspace ?? null,
     gitCredentials: payload.gitCredentials ?? null,
+    gitIdentity: payload.gitIdentity ?? null,
     modelGateway: payload.modelGateway ?? null,
     cooldowns: payload.cooldowns,
     delegation: payload.delegation ?? null,
@@ -386,6 +394,7 @@ function logLocal(jobId: string, message: string, level: "info" | "error" = "inf
 export type ExecuteClaimedJobExtras = {
   delegation?: ClaimedJobPayload["delegation"];
   mcp?: { url: string; apiKey: string } | null;
+  gitIdentity?: ClaimedJobPayload["gitIdentity"];
 };
 
 export async function executeClaimedJob(
@@ -421,6 +430,7 @@ export async function executeClaimedJob(
   setActiveGitCredentials(
     gitCredentials ? { username: gitCredentials.username, token: gitCredentials.token } : null,
   );
+  setActiveGitIdentity(extras?.gitIdentity ?? null);
 
   // Lease keepalive must start before workspace prep: clone/install often exceeds
   // AGENT_JOB_LEASE_TTL_MS (2 min) and used to expire the claim with zero renewals.
@@ -1539,6 +1549,7 @@ export async function executeClaimedJob(
     clearActiveJob(job.id);
     // Never let one job's credential outlive it into the next.
     setActiveGitCredentials(null);
+    setActiveGitIdentity(null);
     logLocal(job.id, `Done (total ${Date.now() - startedAt}ms)`);
   }
 }

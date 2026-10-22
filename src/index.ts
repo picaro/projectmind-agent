@@ -345,6 +345,7 @@ async function main(): Promise<void> {
         {
           delegation: claimed.delegation,
           mcp: { url: mcpUrl.href, apiKey },
+          gitIdentity: claimed.gitIdentity,
         },
       );
     } catch (err) {
@@ -595,6 +596,7 @@ async function main(): Promise<void> {
                 {
                   delegation: claimed.delegation,
                   mcp: { url: mcpUrl.href, apiKey },
+                  gitIdentity: claimed.gitIdentity,
                 },
               );
               console.log(`Job ${job.id} finished OK.`);
