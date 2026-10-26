@@ -89,10 +89,14 @@ export type ClaimedJob = {
   model?: string | null;
   /** When true, mac-agent execution strictly requires the assigned runner without fallback. */
   hard_rule?: boolean;
+  /** `projectm_workflow` = a .projectm CI script, run by projectm-workflow.ts, not an AI runner. */
+  job_kind?: string | null;
 };
 
 export type ClaimedJobPayload = {
   job: ClaimedJob | null;
+  /** Present for `projectm_workflow` jobs: the script, its run, and its secrets. */
+  projectmWorkflow?: import("./projectm-workflow.js").ProjectmWorkflowClaim | null;
   taskWorkspace?: {
     id: string;
     localPath: string;
@@ -229,6 +233,7 @@ export type ClaimedJobBundle = {
   modelGateway: ClaimedJobPayload["modelGateway"];
   cooldowns?: ClaimedJobPayload["cooldowns"];
   delegation?: ClaimedJobPayload["delegation"];
+  projectmWorkflow?: ClaimedJobPayload["projectmWorkflow"];
 };
 
 function hydrateClaimedJob(payload: ClaimedJobPayload): ClaimedJobBundle | null {
@@ -246,6 +251,7 @@ function hydrateClaimedJob(payload: ClaimedJobPayload): ClaimedJobBundle | null 
     modelGateway: payload.modelGateway ?? null,
     cooldowns: payload.cooldowns,
     delegation: payload.delegation ?? null,
+    projectmWorkflow: payload.projectmWorkflow ?? null,
   };
 }
 

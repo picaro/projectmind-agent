@@ -53,6 +53,21 @@ import {
 } from "./continuous-test-runner.js";
 import { detectPlaywrightBrowsers, recordProjectWorkspace } from "./continuous-test-workspace.js";
 import { CONTINUOUS_TEST_AGENT_META_FLAG } from "./improvement-contracts/continuous-test-job.js";
+import {
+  PROJECTM_WORKFLOW_CAPABILITY,
+  detectDocker,
+  isProjectmWorkflowJob,
+  runProjectmWorkflowJob,
+} from "./projectm-workflow.js";
+
+/** `docker version` is slow; check it at most every 5 minutes for the heartbeat. */
+let dockerCheck: { at: number; available: boolean } | null = null;
+function cachedDockerAvailable(): boolean {
+  if (!dockerCheck || Date.now() - dockerCheck.at > 5 * 60_000) {
+    dockerCheck = { at: Date.now(), available: detectDocker() };
+  }
+  return dockerCheck.available;
+}
 
 const cwd = process.cwd();
 const execDir = dirname(process.execPath);
@@ -117,7 +132,14 @@ async function reportHeartbeat(
   const continuousTests = continuousTestsEnabled();
   // continuousTestMedia: forces screenshot/video capture and uploads large
   // files straight to storage (the control plane shows an "update" hint otherwise).
-  meta.capabilities = { managedClone: true, continuousTests, continuousTestMedia: continuousTests };
+  meta.capabilities = {
+    managedClone: true,
+    continuousTests,
+    continuousTestMedia: continuousTests,
+    // .projectm CI scripts run directly on this Mac (image publishes need its Docker).
+    [PROJECTM_WORKFLOW_CAPABILITY]: true,
+    docker: cachedDockerAvailable(),
+  };
   // The control plane only targets idle-time browser tests at agents that set
   // this flag AND have the human "Allow Playwright" toggle on.
   meta[CONTINUOUS_TEST_AGENT_META_FLAG] = continuousTests;
@@ -332,6 +354,10 @@ async function main(): Promise<void> {
       if (!claimed) {
         console.error("claimAgentJob returned no job");
         process.exit(1);
+      }
+      if (isProjectmWorkflowJob(claimed.job)) {
+        await runProjectmWorkflowJob(client, claimed.job, info.agentKey, claimed.projectmWorkflow);
+        return;
       }
       await executeClaimedJob(
         client,
@@ -584,21 +610,25 @@ async function main(): Promise<void> {
             );
             console.log("─".repeat(60));
             try {
-              await executeClaimedJob(
-                client,
-                job,
-                info.agentKey,
-                taskWorkspace,
-                repository,
-                managedWorkspace,
-                gitCredentials,
-                modelGateway,
-                {
-                  delegation: claimed.delegation,
-                  mcp: { url: mcpUrl.href, apiKey },
-                  gitIdentity: claimed.gitIdentity,
-                },
-              );
+              if (isProjectmWorkflowJob(job)) {
+                await runProjectmWorkflowJob(client, job, info.agentKey, claimed.projectmWorkflow);
+              } else {
+                await executeClaimedJob(
+                  client,
+                  job,
+                  info.agentKey,
+                  taskWorkspace,
+                  repository,
+                  managedWorkspace,
+                  gitCredentials,
+                  modelGateway,
+                  {
+                    delegation: claimed.delegation,
+                    mcp: { url: mcpUrl.href, apiKey },
+                    gitIdentity: claimed.gitIdentity,
+                  },
+                );
+              }
               console.log(`Job ${job.id} finished OK.`);
             } catch (err) {
               const errMsg = err instanceof Error ? err.message : String(err);
