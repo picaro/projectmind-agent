@@ -82,6 +82,21 @@ loadEnv({ path: resolve(cwd, "../.env") });
 const DEFAULT_MCP_URL = "http://localhost:8080/api/mcp";
 const DEFAULT_HEARTBEAT_MS = 60_000;
 const DEFAULT_JOB_POLL_MS = 5_000;
+/**
+ * Ceiling for the empty-queue backoff. Every claim is a billed function call
+ * on the control plane; at a flat 5s an idle agent makes ~17k of them a day.
+ */
+const DEFAULT_JOB_POLL_MAX_MS = 30_000;
+
+/**
+ * Wait before the next claim after `emptyStreak` claims in a row found no
+ * job: doubles from the base poll interval up to the ceiling, and drops back
+ * to the base interval as soon as a job is claimed.
+ */
+export function idleClaimDelayMs(emptyStreak: number, baseMs: number, maxMs: number): number {
+  if (emptyStreak <= 0) return baseMs;
+  return Math.min(Math.max(baseMs, maxMs), baseMs * 2 ** Math.min(emptyStreak, 16));
+}
 
 export function buildMcpUrl(baseUrl: string, projectSlug?: string): URL {
   const url = new URL(normalizeMcpBaseUrl(baseUrl));
@@ -392,6 +407,11 @@ async function main(): Promise<void> {
     DEFAULT_JOB_POLL_MS,
     1_000,
   );
+  const jobPollMaxMs = parseIntervalMs(
+    process.env.IMEMORY_JOB_POLL_MAX_INTERVAL_MS,
+    DEFAULT_JOB_POLL_MAX_MS,
+    1_000,
+  );
 
   const allowlist = parseAllowlist(process.env.IMEMORY_WORKSPACE_ALLOWLIST);
   const info = collectMachineInfo();
@@ -409,7 +429,7 @@ async function main(): Promise<void> {
   console.log(`  Agent key: ${info.agentKey}`);
   console.log(`  Install: ${install.kind}`);
   console.log(`  Heartbeat: ${heartbeatMs}ms`);
-  console.log(`  Job poll: ${jobPollMs}ms`);
+  console.log(`  Job poll: ${jobPollMs}ms (backs off to ${jobPollMaxMs}ms while idle)`);
   console.log(`  Auto-update: ${autoUpdate ? "on" : "off"}`);
   
   if (allowlist.length === 0) {
@@ -546,6 +566,8 @@ async function main(): Promise<void> {
   }
 
   let pollCount = 0;
+  /** Claim attempts in a row that came back empty (or were skipped); drives the backoff. */
+  let emptyClaims = 0;
 
   while (!stopping) {
     try {
@@ -573,12 +595,14 @@ async function main(): Promise<void> {
         // Claiming is not a safe side channel for cooldown sync — that happens on heartbeat.
         const runnersReady = await hasAnyAvailableRunner();
         if (!runnersReady) {
+          emptyClaims += 1;
           // Log once every 12 polls to avoid spam.
           if (pollCount === 1 || pollCount % 12 === 0) {
             console.log("All runners in cooldown/disabled — skipping claim attempt");
           }
         } else {
           const claimed = await claimNextJob(client, info.agentKey);
+          emptyClaims = claimed ? 0 : emptyClaims + 1;
           if (claimed) {
             const {
               job,
@@ -683,7 +707,7 @@ async function main(): Promise<void> {
     }
 
     if (stopping) break;
-    await sleep(jobPollMs);
+    await sleep(idleClaimDelayMs(emptyClaims, jobPollMs, jobPollMaxMs));
   }
 }
 
