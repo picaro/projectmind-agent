@@ -1,5 +1,6 @@
 import { config as loadEnv } from "dotenv";
 import { resolve, dirname } from "node:path";
+import { credentialEnvCandidates, resolveActiveCredentialEnvPath } from "./credential-env.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   collectCpuLoadPercent,
@@ -8,7 +9,7 @@ import {
   normalizeMcpBaseUrl,
   sleep,
 } from "./machine.js";
-import { connectMcpClient, callToolJson } from "./mcp-client.js";
+import { connectMcpClient, callToolJson, isMcpAuthRejectedError } from "./mcp-client.js";
 import { claimNextJob, claimSpecificJob, executeClaimedJob, hasAnyAvailableRunner } from "./jobs.js";
 import { syncGlobalCooldowns } from "./provider-pacing.js";
 import { getClaudeUsageSnapshot } from "./claude-usage.js";
@@ -33,6 +34,7 @@ import {
   parseUpdateCheckIntervalMs,
 } from "./self-update.js";
 import { shouldRunSetupWizard, runSetupWizard } from "./setup-wizard.js";
+import { runDeviceLogin } from "./device-login.js";
 import {
   parseCliCommand,
   runSetupCommand,
@@ -74,10 +76,9 @@ const execDir = dirname(process.execPath);
 
 // Packaged zip: `.env` next to the binary or in cwd.
 // Dev (`npm start` in mac-agent/): cwd `.env`, then parent repo `.env`.
-loadEnv({ path: resolve(cwd, ".env") });
-loadEnv({ path: resolve(execDir, ".env") });
-loadEnv({ path: resolve(cwd, "mac-agent/.env") });
-loadEnv({ path: resolve(cwd, "../.env") });
+for (const envFile of credentialEnvCandidates(cwd, execDir)) {
+  loadEnv({ path: envFile });
+}
 
 const DEFAULT_MCP_URL = "http://localhost:8080/api/mcp";
 const DEFAULT_HEARTBEAT_MS = 60_000;
@@ -243,7 +244,7 @@ async function main(): Promise<void> {
   
   // Handle CLI commands
   const { command, args } = parseCliCommand(process.argv.slice(2));
-  const envPath = resolve(cwd, ".env");
+  const envPath = await resolveActiveCredentialEnvPath(cwd, execDir);
   
   if (command === "help") {
     showHelp(agentVersion);
@@ -315,7 +316,7 @@ async function main(): Promise<void> {
     }
   }
   
-  const apiKey = process.env.IMEMORY_API_KEY?.trim() || process.env.MCP_API_KEY?.trim();
+  let apiKey = process.env.IMEMORY_API_KEY?.trim() || process.env.MCP_API_KEY?.trim();
   if (!apiKey) {
     console.error("\n❌ Missing IMEMORY_API_KEY (or MCP_API_KEY).");
     console.error("Create a project API key in ProjectMind settings.\n");
@@ -323,7 +324,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const mcpUrl = buildMcpUrl(
+  let mcpUrl = buildMcpUrl(
     process.env.IMEMORY_MCP_URL?.trim() || DEFAULT_MCP_URL,
     process.env.IMEMORY_PROJECT_SLUG?.trim() || process.env.MCP_PROJECT_SLUG?.trim(),
   );
@@ -458,7 +459,29 @@ async function main(): Promise<void> {
     }
   }
 
-  let client = await connectMcpClient(mcpUrl, apiKey);
+  let client: Client;
+  try {
+    client = await connectMcpClient(mcpUrl, apiKey);
+  } catch (err) {
+    if (!isMcpAuthRejectedError(err)) throw err;
+    console.error(
+      "\nProjectMind rejected the saved API key. It is missing, revoked, or expired.",
+    );
+    if (!process.stdin.isTTY && !process.stdout.isTTY) {
+      console.error(`Run \`projectmind-agent login\` to replace the key in ${envPath}, then start again.\n`);
+      process.exit(1);
+    }
+    console.error(`Starting browser login. The new key is written to ${envPath}\n`);
+    const login = await runDeviceLogin({ envPath, mcpUrl: mcpUrl.href });
+    if (!login.success || !login.apiKey) {
+      process.exit(1);
+    }
+    apiKey = login.apiKey;
+    if (login.projectSlug) {
+      mcpUrl = buildMcpUrl(mcpUrl.origin + mcpUrl.pathname, login.projectSlug);
+    }
+    client = await connectMcpClient(mcpUrl, apiKey);
+  }
   const continuousTests = new ContinuousTestCoordinator({
     deps: defaultRunnerDeps((name, toolArgs) => callToolJson(client, name, toolArgs), info.agentKey),
     enabled: continuousTestsEnabled(),

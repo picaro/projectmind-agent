@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { parseToolJson, toolText } from "./mcp-client.js";
+import { isMcpAuthRejectedError, parseToolJson, toolText } from "./mcp-client.js";
+
+describe("isMcpAuthRejectedError", () => {
+  it("matches the control-plane unauthorized body", () => {
+    const err = new Error(
+      'Streamable HTTP error: Error POSTing to endpoint: {"error":{"data":{"code":"UNAUTHORIZED"},"message":"Missing or invalid auth."}}',
+    );
+    expect(isMcpAuthRejectedError(err)).toBe(true);
+    expect(isMcpAuthRejectedError(new Error("network down"))).toBe(false);
+  });
+});
 
 describe("toolText", () => {
   it("joins text parts and stringifies non-text parts", () => {

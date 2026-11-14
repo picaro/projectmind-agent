@@ -20,6 +20,12 @@ export async function connectMcpClient(mcpUrl: URL, apiKey: string): Promise<Cli
   return client;
 }
 
+/** True when the control plane rejected the bearer key (revoked, expired, or unknown). */
+export function isMcpAuthRejectedError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /UNAUTHORIZED|Missing or invalid auth/i.test(message);
+}
+
 export function toolText(result: {
   content?: Array<{ type: string; text?: string }>;
   isError?: boolean;
