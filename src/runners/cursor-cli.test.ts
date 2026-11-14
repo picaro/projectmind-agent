@@ -5,11 +5,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createCursorCliRunner,
   formatCursorCliExitError,
+  formatCursorCliOutputIdleError,
   installCursorWorkspaceMcpConfig,
   parseCursorCliModelRejection,
   pickClosestCursorCliModel,
   resolveCursorCliCommand,
   resolveCursorCliModelFlag,
+  resolveCursorCliOutputIdleMs,
+  CURSOR_CLI_OUTPUT_IDLE_MS,
   sanitizeCursorCliExtraArgs,
 } from "./cursor-cli.js";
 
@@ -69,6 +72,23 @@ describe("resolveCursorCliModelFlag", () => {
     expect(resolveCursorCliModelFlag("claude-opus-4-5")).toBe("claude-opus-4-5");
     expect(resolveCursorCliModelFlag("claude-4.5-sonnet")).toBe("claude-4.5-sonnet");
     expect(resolveCursorCliModelFlag("composer-2.5")).toBe("composer-2.5");
+  });
+});
+
+describe("cursor CLI output idle", () => {
+  it("defaults to 10 minutes and ignores unusable overrides", () => {
+    expect(CURSOR_CLI_OUTPUT_IDLE_MS).toBe(10 * 60 * 1000);
+    expect(resolveCursorCliOutputIdleMs(undefined)).toBe(CURSOR_CLI_OUTPUT_IDLE_MS);
+    expect(resolveCursorCliOutputIdleMs("")).toBe(CURSOR_CLI_OUTPUT_IDLE_MS);
+    expect(resolveCursorCliOutputIdleMs("nope")).toBe(CURSOR_CLI_OUTPUT_IDLE_MS);
+    expect(resolveCursorCliOutputIdleMs("500")).toBe(CURSOR_CLI_OUTPUT_IDLE_MS);
+    expect(resolveCursorCliOutputIdleMs("120000")).toBe(120_000);
+  });
+
+  it("describes the idle kill in minutes", () => {
+    expect(formatCursorCliOutputIdleError(10 * 60 * 1000)).toBe(
+      "Cursor CLI produced no output for 10m — terminating hung process",
+    );
   });
 });
 
