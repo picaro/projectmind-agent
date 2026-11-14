@@ -66,10 +66,19 @@ describe("resolveCursorCliModelFlag", () => {
     expect(resolveCursorCliModelFlag("claude-3-5-sonnet")).toBe("claude-4.5-sonnet");
     expect(resolveCursorCliModelFlag("claude-3.5-sonnet")).toBe("claude-4.5-sonnet");
     expect(resolveCursorCliModelFlag("claude-sonnet-4.5")).toBe("claude-4.5-sonnet");
+    expect(resolveCursorCliModelFlag("claude-opus-4-5")).toBe("claude-opus-5-5-high");
+    expect(resolveCursorCliModelFlag("claude-4.5-opus-high")).toBe("claude-opus-5-5-high");
+    expect(resolveCursorCliModelFlag("claude-4.5-opus-high-thinking")).toBe(
+      "claude-opus-5-thinking-high",
+    );
+    expect(resolveCursorCliModelFlag("cursor-grok-4.6-high")).toBe("grok-4.7-high");
+    expect(resolveCursorCliModelFlag("cursor-grok-4.6-high-fast")).toBe("grok-4.7-high-fast");
+    expect(resolveCursorCliModelFlag("cursor-grok-4.5-low")).toBe("grok-4.7-low");
   });
 
   it("passes through ids that are already Cursor CLI catalog names", () => {
-    expect(resolveCursorCliModelFlag("claude-opus-4-5")).toBe("claude-opus-4-5");
+    expect(resolveCursorCliModelFlag("claude-opus-5-5-high")).toBe("claude-opus-5-5-high");
+    expect(resolveCursorCliModelFlag("grok-4.7-medium")).toBe("grok-4.7-medium");
     expect(resolveCursorCliModelFlag("claude-4.5-sonnet")).toBe("claude-4.5-sonnet");
     expect(resolveCursorCliModelFlag("composer-2.5")).toBe("composer-2.5");
   });
@@ -123,7 +132,13 @@ describe("pickClosestCursorCliModel", () => {
 
   it("prefers the matching family over other vendors", () => {
     expect(pickClosestCursorCliModel("claude-3-5-sonnet", catalog)).toBe("claude-4.5-sonnet");
-    expect(pickClosestCursorCliModel("claude-opus-4-5", catalog)).toBe("claude-4.5-opus-high");
+    expect(pickClosestCursorCliModel("claude-opus-4-5", catalog)).toBe("auto");
+  });
+
+  it("prefers a current opus over deprecated Opus 4.5 when both are listed", () => {
+    expect(
+      pickClosestCursorCliModel("claude-opus-4-5", [...catalog, "claude-opus-5-5-high"]),
+    ).toBe("claude-opus-5-5-high");
   });
 
   it("falls back to auto when no family match exists", () => {

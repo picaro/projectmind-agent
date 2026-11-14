@@ -1,5 +1,6 @@
 import type { Runner, RunnerResult } from "./types.js";
 import { buildCursorSdkMcpServers } from "../projectmind-mcp.js";
+import { canonicalDeprecatedModel } from "./deprecated-models.js";
 
 function summarizeEvent(event: unknown): string {
   if (!event || typeof event !== "object") {
@@ -78,7 +79,8 @@ export function cursorSdkCreateOptions(input: {
 }
 
 export function createCursorSdkRunner(options: { apiKey: string; model?: string }): Runner {
-  const model = options.model?.trim() || "composer-2.5";
+  const configured = options.model?.trim() || "composer-2.5";
+  const model = canonicalDeprecatedModel(configured);
 
   return {
     name: "cursor_sdk",

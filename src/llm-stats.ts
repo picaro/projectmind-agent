@@ -12,6 +12,7 @@ import {
   type PacingEvent,
   type ProviderName,
 } from "./provider-pacing.js";
+import { canonicalDeprecatedModel, canonicalLlmUsageKey } from "./runners/deprecated-models.js";
 
 export type LlmUsageEntry = {
   count: number;
@@ -60,7 +61,29 @@ const DEFAULT_STATS: LlmUsageStats = {
 export function llmUsageKey(runner: string, model: string): string {
   const r = runner.trim() || "unknown";
   const m = model.trim() || "default";
-  return `${r}/${m}`;
+  return canonicalLlmUsageKey(`${r}/${canonicalDeprecatedModel(m)}`);
+}
+
+function mergeUsageEntry(a: LlmUsageEntry, b: LlmUsageEntry): LlmUsageEntry {
+  const newer = a.lastUsedAt >= b.lastUsedAt ? a : b;
+  const older = newer === a ? b : a;
+  return {
+    ...older,
+    ...newer,
+    count: a.count + b.count,
+    lastUsedAt: newer.lastUsedAt,
+  };
+}
+
+/** Fold deprecated model ids (Grok 4.6, Opus 4.5, …) into their replacements. */
+export function canonicalizeLlmStats(stats: LlmUsageStats): LlmUsageStats {
+  const byLlm: Record<string, LlmUsageEntry> = {};
+  for (const [key, entry] of Object.entries(stats.byLlm)) {
+    const canonical = canonicalLlmUsageKey(key);
+    const prev = byLlm[canonical];
+    byLlm[canonical] = prev ? mergeUsageEntry(prev, entry) : entry;
+  }
+  return { ...stats, byLlm };
 }
 
 export function resolveLlmStatsPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -172,12 +195,12 @@ export async function loadLlmStats(filePath: string): Promise<LlmUsageStats> {
       );
     }
 
-    return {
+    return canonicalizeLlmStats({
       updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : DEFAULT_STATS.updatedAt,
       byLlm,
       ...(byProvider ? { byProvider } : {}),
       ...(pacingEvents ? { pacingEvents } : {}),
-    };
+    });
   } catch {
     return { ...DEFAULT_STATS, byLlm: {} };
   }
@@ -230,7 +253,7 @@ export async function recordLlmUsage(options: {
   const filePath = options.filePath ?? resolveLlmStatsPath();
   const now = options.now ?? new Date();
   const stamp = now.toISOString();
-  const key = llmUsageKey(options.runner, options.model?.trim() || "default");
+  const key = llmUsageKey(options.runner, canonicalDeprecatedModel(options.model?.trim() || "default"));
 
   const stats = await loadLlmStats(filePath);
   const prev = stats.byLlm[key];
@@ -273,7 +296,7 @@ export async function syncPacingToLlmStats(
 
 export function toLlmUsageMeta(stats: LlmUsageStats): LlmUsageMeta {
   const byLlm: Record<string, number> = {};
-  for (const [key, entry] of Object.entries(stats.byLlm)) {
+  for (const [key, entry] of Object.entries(canonicalizeLlmStats(stats).byLlm)) {
     byLlm[key] = entry.count;
   }
 

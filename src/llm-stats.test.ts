@@ -117,6 +117,52 @@ describe("llm-stats", () => {
     expect(february.byLlm["cursor_cli/default"]?.lastUsedAt).toBe("2026-02-01T00:30:00.000Z");
   });
 
+  it("folds deprecated Grok 4.6 and Opus 4.5 usage onto current model ids", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "imemory-llm-stats-"));
+    const filePath = path.join(dir, "usage.json");
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        updatedAt: "2026-10-15T00:00:00.000Z",
+        byLlm: {
+          "cursor_cli/cursor-grok-4.6-high": {
+            count: 504,
+            lastUsedAt: "2026-10-15T16:54:31.962Z",
+          },
+          "cursor_cli/claude-opus-4-5": {
+            count: 138,
+            lastUsedAt: "2026-08-20T16:09:53.588Z",
+          },
+          "cursor_cli/grok-4.7-high": {
+            count: 2,
+            lastUsedAt: "2026-11-01T00:00:00.000Z",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const stats = await loadLlmStats(filePath);
+    expect(stats.byLlm["cursor_cli/cursor-grok-4.6-high"]).toBeUndefined();
+    expect(stats.byLlm["cursor_cli/claude-opus-4-5"]).toBeUndefined();
+    expect(stats.byLlm["cursor_cli/grok-4.7-high"]?.count).toBe(506);
+    expect(stats.byLlm["cursor_cli/claude-opus-5-5-high"]?.count).toBe(138);
+
+    const meta = toLlmUsageMeta(stats);
+    expect(meta.byLlm["cursor_cli/grok-4.7-high"]).toBe(506);
+    expect(meta.byLlm["cursor_cli/claude-opus-5-5-high"]).toBe(138);
+
+    const recorded = await recordLlmUsage({
+      runner: "cursor_cli",
+      model: "cursor-grok-4.6-high-fast",
+      filePath,
+      now: new Date("2026-11-14T00:00:00.000Z"),
+      syncPacing: false,
+    });
+    expect(recorded.byLlm["cursor_cli/grok-4.7-high-fast"]?.count).toBe(1);
+    expect(recorded.byLlm["cursor_cli/cursor-grok-4.6-high-fast"]).toBeUndefined();
+  });
+
   it("omits pacing metadata when nothing has been recorded", () => {
     resetProviderPacing();
     const meta = toLlmUsageMeta({ updatedAt: new Date(0).toISOString(), byLlm: {} });

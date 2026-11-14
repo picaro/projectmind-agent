@@ -1,6 +1,20 @@
 import { runCliProcess, tryParseJsonLine } from "./cli-process.js";
 import type { Runner, RunnerResult, RunnerUsageStats } from "./types.js";
 import { appendCliMcpArgs } from "../projectmind-mcp.js";
+import { canonicalDeprecatedModel } from "./deprecated-models.js";
+
+/**
+ * Claude Code accepts family aliases (`opus`) and its own model names.
+ * Deprecated Cursor/Anthropic ids are folded onto `opus` so we do not pass
+ * Grok 4.6 or Opus 4.5 through as a literal `--model`.
+ */
+export function resolveClaudeCliModel(model?: string | null): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === "default") return undefined;
+  const canonical = canonicalDeprecatedModel(trimmed);
+  if (canonical === trimmed) return trimmed;
+  return "opus";
+}
 
 /**
  * Claude Code's `stream-json` terminal event carries usage/cost/timing, e.g.:
@@ -131,7 +145,8 @@ export function createClaudeCliRunner(options: {
     options.model?.trim() || process.env.IMEMORY_CLAUDE_MODEL?.trim() || undefined;
   // Older agent settings and jobs used "default" as the Auto sentinel. Claude
   // treats it as a literal model ID, so omit --model and let the CLI choose.
-  const model = configuredModel?.toLowerCase() === "default" ? undefined : configuredModel;
+  const model =
+    configuredModel?.toLowerCase() === "default" ? undefined : resolveClaudeCliModel(configuredModel);
   const skipPermissions =
     options.skipPermissions ?? process.env.IMEMORY_CLAUDE_SKIP_PERMISSIONS?.trim() !== "0";
   const permissionMode = process.env.IMEMORY_CLAUDE_PERMISSION_MODE?.trim() || undefined;

@@ -1,19 +1,23 @@
 import { runCliProcess } from "./cli-process.js";
 import type { Runner, RunnerResult } from "./types.js";
+import { canonicalDeprecatedModel } from "./deprecated-models.js";
 
 /**
- * Cursor catalog ids are not in `agy models`. Grok High maps to Antigravity's
- * strong model; other Cursor/Composer leftovers are dropped so agy uses its default.
+ * Cursor catalog ids are not in `agy models`. Grok maps to Antigravity's
+ * current strong model; other Cursor/Composer leftovers are dropped so agy uses its default.
  */
 export function resolveAntigravityCliModel(model?: string | null): string | undefined {
   const trimmed = model?.trim() ?? "";
   const key = trimmed.toLowerCase();
   if (!trimmed || key === "auto" || key === "default") return undefined;
-  if (key.startsWith("cursor-grok-")) return "claude-opus-4-6-thinking";
+  const canonical = canonicalDeprecatedModel(trimmed);
+  if (key.startsWith("cursor-grok-") || key.startsWith("grok-") || canonical.startsWith("grok-")) {
+    return "claude-opus-5-5-high";
+  }
   if (key.startsWith("cursor-") || key.startsWith("composer-") || key === "composer") {
     return undefined;
   }
-  return trimmed;
+  return canonical;
 }
 
 /**

@@ -6,10 +6,9 @@ import { createAntigravityCliRunner, resolveAntigravityCliModel } from "./antigr
 
 describe("resolveAntigravityCliModel", () => {
   it("maps Cursor Grok High onto an agy catalog id", () => {
-    expect(resolveAntigravityCliModel("cursor-grok-4.6-high")).toBe("claude-opus-4-6-thinking");
-    expect(resolveAntigravityCliModel("cursor-grok-4.6-high-fast")).toBe(
-      "claude-opus-4-6-thinking",
-    );
+    expect(resolveAntigravityCliModel("cursor-grok-4.6-high")).toBe("claude-opus-5-5-high");
+    expect(resolveAntigravityCliModel("cursor-grok-4.6-high-fast")).toBe("claude-opus-5-5-high");
+    expect(resolveAntigravityCliModel("claude-opus-4-5")).toBe("claude-opus-5-5-high");
   });
 
   it("drops other Cursor and Composer leftovers", () => {
@@ -58,7 +57,7 @@ echo "model=$model"
     });
 
     expect(result.status).toBe("succeeded");
-    expect(result.summary).toContain("model=claude-opus-4-6-thinking");
-    expect(result.model).toBe("claude-opus-4-6-thinking");
+    expect(result.summary).toContain("model=claude-opus-5-5-high");
+    expect(result.model).toBe("claude-opus-5-5-high");
   });
 });

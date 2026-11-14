@@ -7,6 +7,7 @@ import {
   buildCliMcpConfigFileContents,
   type ProjectMindMcpConfig,
 } from "../projectmind-mcp.js";
+import { canonicalDeprecatedModel } from "./deprecated-models.js";
 
 function summarizeCursorCliEvent(obj: Record<string, unknown>): string | null {
   const type = typeof obj.type === "string" ? obj.type : "event";
@@ -109,8 +110,13 @@ const CURSOR_CLI_MODEL_ALIASES: Record<string, string> = {
   "claude-3.5-haiku": "claude-4.5-sonnet",
   "claude-sonnet-4": "claude-4-sonnet",
   "claude-sonnet-4.5": "claude-4.5-sonnet",
-  "claude-4-opus": "claude-4.5-opus-high",
-  "claude-4.5-opus": "claude-4.5-opus-high",
+  "claude-4-opus": "claude-opus-5-5-high",
+  "claude-4.5-opus": "claude-opus-5-5-high",
+  "claude-4.5-opus-high": "claude-opus-5-5-high",
+  "claude-4.5-opus-high-thinking": "claude-opus-5-thinking-high",
+  "claude-opus-4-5": "claude-opus-5-5-high",
+  "claude-opus-4-6": "claude-opus-5-5-high",
+  "claude-opus-4-6-thinking": "claude-opus-5-5-high",
 };
 
 const MODEL_FAMILY_TOKENS = new Set([
@@ -139,7 +145,8 @@ export function resolveCursorCliModelFlag(model?: string | null): string | undef
   if (!trimmed) return undefined;
   const key = trimmed.toLowerCase();
   if (key === "default") return undefined;
-  return CURSOR_CLI_MODEL_ALIASES[key] ?? trimmed;
+  const aliased = CURSOR_CLI_MODEL_ALIASES[key] ?? trimmed;
+  return canonicalDeprecatedModel(aliased);
 }
 
 export function parseCursorCliModelRejection(
@@ -175,6 +182,7 @@ export function pickClosestCursorCliModel(
     for (const t of reqTokens) {
       if (tokenSet.has(t)) score += 2;
     }
+    if (canonicalDeprecatedModel(id) !== id) score -= 10;
     if (/thinking/i.test(id)) score -= 4;
     if (/-fast$/i.test(id)) score -= 2;
     if (/-max$/i.test(id) || /xhigh/i.test(id)) score -= 1;
