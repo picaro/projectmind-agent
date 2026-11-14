@@ -7,6 +7,8 @@ export type CliProcessResult = {
   stdout: string;
   stderr: string;
   cancelled: boolean;
+  /** Set when the child was killed because stdout and stderr both went quiet. */
+  outputIdle: boolean;
 };
 
 /**
@@ -23,6 +25,11 @@ export async function runCliProcess(options: {
   onStdoutLine?: (line: string) => boolean | void | Promise<boolean | void>;
   /** Max total stdout chars retained for summary (default 200_000). */
   maxStdoutChars?: number;
+  /**
+   * Kill the child when neither stdout nor stderr receives a chunk for this
+   * long. Unset or non-positive disables the idle watch.
+   */
+  outputIdleMs?: number;
 }): Promise<CliProcessResult> {
   const maxStdout = options.maxStdoutChars ?? 200_000;
   await options.onLog(
@@ -49,6 +56,7 @@ export async function runCliProcess(options: {
         stdout: "",
         stderr: err instanceof Error ? err.message : String(err),
         cancelled: false,
+        outputIdle: false,
       });
       return;
     }
@@ -60,6 +68,7 @@ export async function runCliProcess(options: {
         stdout: "",
         stderr: "Failed to open child stdio pipes",
         cancelled: false,
+        outputIdle: false,
       });
       return;
     }
@@ -70,16 +79,31 @@ export async function runCliProcess(options: {
     let stderrBuf = "";
     let settled = false;
     let cancelled = false;
+    let outputIdle = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const outputIdleMs =
+      typeof options.outputIdleMs === "number" && options.outputIdleMs > 0
+        ? options.outputIdleMs
+        : 0;
+
+    const clearIdle = () => {
+      if (idleTimer != null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+    };
 
     const finish = (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
+      clearIdle();
       options.signal.removeEventListener("abort", onAbort);
-      resolve({ code, signal, stdout, stderr, cancelled });
+      resolve({ code, signal, stdout, stderr, cancelled, outputIdle });
     };
 
-    const killChild = () => {
-      cancelled = true;
+    const killChild = (reason: "abort" | "idle") => {
+      if (reason === "abort") cancelled = true;
+      if (reason === "idle") outputIdle = true;
       try {
         child.kill("SIGTERM");
       } catch {
@@ -94,9 +118,25 @@ export async function runCliProcess(options: {
       }, 5_000).unref();
     };
 
+    const armIdle = () => {
+      if (!outputIdleMs || settled) return;
+      clearIdle();
+      idleTimer = setTimeout(() => {
+        if (settled) return;
+        const seconds = Math.max(1, Math.round(outputIdleMs / 1000));
+        void options.onLog(
+          `CLI produced no output for ${seconds}s — terminating hung process`,
+          "error",
+        );
+        killChild("idle");
+      }, outputIdleMs);
+      idleTimer.unref?.();
+    };
+
     const onAbort = () => {
+      clearIdle();
       void options.onLog("Abort signal — terminating CLI process", "status");
-      killChild();
+      killChild("abort");
     };
 
     if (options.signal.aborted) {
@@ -135,14 +175,17 @@ export async function runCliProcess(options: {
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    if (!options.signal.aborted) armIdle();
 
     child.stdout.on("data", (chunk: string) => {
+      armIdle();
       appendStdout(chunk);
       stdoutBuf += chunk;
       void flushStdoutLines(false);
     });
 
     child.stderr.on("data", (chunk: string) => {
+      armIdle();
       if (stderr.length < maxStdout) {
         const room = maxStdout - stderr.length;
         stderr += chunk.length > room ? chunk.slice(0, room) : chunk;

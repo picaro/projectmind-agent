@@ -87,6 +87,42 @@ describe("runCliProcess", () => {
     });
     expect(seen.some((l) => l.includes('"ping"'))).toBe(true);
   });
+
+  it("kills a child that produces no output before the idle limit", async () => {
+    const logs: string[] = [];
+    const result = await runCliProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => {}, 30_000)"],
+      cwd: process.cwd(),
+      signal: new AbortController().signal,
+      outputIdleMs: 200,
+      onLog: async (message) => {
+        logs.push(message);
+      },
+    });
+
+    expect(result.outputIdle).toBe(true);
+    expect(result.cancelled).toBe(false);
+    expect(logs.some((line) => /no output for \d+s/.test(line))).toBe(true);
+  });
+
+  it("resets the idle clock when the child keeps writing", async () => {
+    const result = await runCliProcess({
+      command: process.execPath,
+      args: [
+        "-e",
+        "const fs = require('fs'); fs.writeSync(1, 'tick\\n'); setTimeout(() => { fs.writeSync(1, 'tick\\n'); process.exit(0); }, 300);",
+      ],
+      cwd: process.cwd(),
+      signal: new AbortController().signal,
+      outputIdleMs: 1_000,
+      onLog: async () => {},
+    });
+
+    expect(result.outputIdle).toBe(false);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("tick");
+  });
 });
 
 describe("cursor/codex CLI binaries (optional)", () => {

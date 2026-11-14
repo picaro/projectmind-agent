@@ -487,11 +487,6 @@ export async function executeClaimedJob(
         jobStatus: status ?? "?",
       });
       logLocal(job.id, successMsg);
-      await appendLog(client, job.id, agentKey, successMsg, renewCount === 1 ? "status" : "log").catch(
-        () => {
-          // best-effort: never fail the renew path because logging failed
-        },
-      );
     } catch (err) {
       consecutiveRenewFailures += 1;
       const errText = err instanceof Error ? err.message : String(err);
@@ -536,7 +531,8 @@ export async function executeClaimedJob(
       pid: process.pid,
     });
     logLocal(job.id, startMsg);
-    await appendLog(client, job.id, agentKey, startMsg, "status").catch(() => {});
+    // Keepalive lines stay on the local console. Uploading them as log/status
+    // advances last_progress_at and hides a hung runner from the silence kill.
 
     await renewLease();
     if (abort.signal.aborted) {

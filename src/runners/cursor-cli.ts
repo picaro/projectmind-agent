@@ -259,6 +259,27 @@ function tryMirrorMcpConfigFile(sourcePath: string, cwd: string): void {
 export const CURSOR_CLI_PREFERRED_BIN = "cursor-agent";
 export const CURSOR_CLI_COMPAT_BIN = "agent";
 
+/**
+ * Kill `cursor-agent` when its stream goes quiet. Matches the control-plane
+ * progress-silence window (10m) so a hung model is stopped by the runner
+ * instead of waiting out the wall clock. Stdout or stderr resets the clock,
+ * so a streaming tool is left alone.
+ */
+export const CURSOR_CLI_OUTPUT_IDLE_MS = 10 * 60 * 1000;
+
+export function resolveCursorCliOutputIdleMs(raw?: string | null): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return CURSOR_CLI_OUTPUT_IDLE_MS;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 1_000) return CURSOR_CLI_OUTPUT_IDLE_MS;
+  return Math.trunc(parsed);
+}
+
+export function formatCursorCliOutputIdleError(idleMs: number): string {
+  const minutes = Math.max(1, Math.round(idleMs / 60_000));
+  return `Cursor CLI produced no output for ${minutes}m — terminating hung process`;
+}
+
 export function cursorCliBinFromEnv(): string {
   return process.env.IMEMORY_CURSOR_CLI_BIN?.trim() || process.env.CURSOR_CLI_BIN?.trim() || "";
 }
@@ -340,6 +361,7 @@ export function createCursorCliRunner(options: {
 }): Runner {
   const explicitCommand = options.command?.trim() || cursorCliBinFromEnv();
   const configuredModel = options.model?.trim() || process.env.IMEMORY_CURSOR_MODEL?.trim();
+  const outputIdleMs = resolveCursorCliOutputIdleMs(process.env.IMEMORY_CURSOR_CLI_OUTPUT_IDLE_MS);
 
   return {
     name: "cursor_cli",
@@ -400,6 +422,7 @@ export function createCursorCliRunner(options: {
           cwd,
           env: options.apiKey?.trim() ? { CURSOR_API_KEY: options.apiKey.trim() } : undefined,
           signal,
+          outputIdleMs,
           onLog,
           onStdoutLine: async (line) => {
             const obj = tryParseJsonLine(line);
@@ -423,6 +446,18 @@ export function createCursorCliRunner(options: {
 
       let result = await spawnOnce();
       const resolvedModel = () => model || "default";
+      const idleFailure = (): RunnerResult | null =>
+        result.outputIdle
+          ? {
+              status: "failed",
+              summary: lastAssistant,
+              error: formatCursorCliOutputIdleError(outputIdleMs),
+              model: resolvedModel(),
+            }
+          : null;
+
+      const hung = idleFailure();
+      if (hung) return hung;
 
       if (result.cancelled || signal.aborted) {
         return {
@@ -447,6 +482,9 @@ export function createCursorCliRunner(options: {
           result = await spawnOnce();
         }
       }
+
+      const hungAfterRetry = idleFailure();
+      if (hungAfterRetry) return hungAfterRetry;
 
       if (result.cancelled || signal.aborted) {
         return {
