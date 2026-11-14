@@ -502,6 +502,9 @@ export async function executeClaimedJob(
         phase: currentPhase,
         jobStatus: status ?? "?",
       });
+      // Local only. A successful renew every 60s is not runner progress; uploading
+      // it advances last_progress_at and hides a hung CLI from the silence kill.
+      // Failures below still upload because they are rare and explain an abort.
       logLocal(job.id, successMsg);
     } catch (err) {
       consecutiveRenewFailures += 1;
