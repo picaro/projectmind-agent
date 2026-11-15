@@ -12,7 +12,7 @@ vi.mock("./health-check.js", () => ({
   runHealthCheck: (...args: unknown[]) => runHealthCheck(...args),
 }));
 
-import { buildMcpUrl, maybeRunHealthCheck, parseIntervalMs } from "./index.js";
+import { buildMcpUrl, idleClaimDelayMs, maybeRunHealthCheck, parseIntervalMs } from "./index.js";
 
 describe("buildMcpUrl", () => {
   it("adds a project slug once and drops a trailing slash", () => {
@@ -25,6 +25,23 @@ describe("buildMcpUrl", () => {
       "projectSlug",
     )).toBe("keep");
     expect(buildMcpUrl("http://localhost:8080/api/mcp", "").search).toBe("");
+  });
+});
+
+describe("idleClaimDelayMs", () => {
+  it("polls at the base interval until a claim comes back empty", () => {
+    expect(idleClaimDelayMs(0, 5_000, 30_000)).toBe(5_000);
+  });
+
+  it("doubles per empty claim and caps at the ceiling", () => {
+    expect(idleClaimDelayMs(1, 5_000, 30_000)).toBe(10_000);
+    expect(idleClaimDelayMs(2, 5_000, 30_000)).toBe(20_000);
+    expect(idleClaimDelayMs(3, 5_000, 30_000)).toBe(30_000);
+    expect(idleClaimDelayMs(1_000, 5_000, 30_000)).toBe(30_000);
+  });
+
+  it("never waits less than the base interval", () => {
+    expect(idleClaimDelayMs(3, 60_000, 30_000)).toBe(60_000);
   });
 });
 
