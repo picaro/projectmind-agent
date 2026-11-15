@@ -553,14 +553,51 @@ export async function ensureManagedArchiveWorkspace(
 }
 
 /**
- * Make `localPath` a usable checkout of `cloneUrl`.
- *
- *  - absent, or exists empty -> git clone (git clones into an empty directory
- *    exactly like a fresh one)
- *  - existing repo   -> fetch + reset --hard to the remote default branch
- *  - existing non-empty, non-repo -> fail loudly; never delete a directory we
- *    did not create
+ * Remote-tracking refs named in git's "is at X but expected Y" fetch error.
+ * That error means another fetch already moved the ref to the commit this one
+ * was about to write. Only `refs/remotes/…` names are returned.
  */
+export function staleRemoteTrackingRefs(text: string): string[] {
+  const staleRemoteTrackingRef =
+    /cannot lock ref '(refs\/remotes\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+)': is at [0-9a-f]+ but expected [0-9a-f]+/gi;
+  const refs: string[] = [];
+  for (const match of text.matchAll(staleRemoteTrackingRef)) {
+    const ref = match[1];
+    if (!ref || ref.includes("..") || refs.includes(ref)) continue;
+    refs.push(ref);
+  }
+  return refs;
+}
+
+/**
+ * `git fetch --prune` against a checkout that several jobs share. A concurrent
+ * fetch can win the compare-and-swap on `refs/remotes/origin/main` ("is at
+ * <new> but expected <old>"). The ref is already where this fetch wanted it.
+ * Drop those remote-tracking refs and fetch once more. Auth and missing-repo
+ * failures are returned as-is.
+ */
+async function fetchOriginPrune(
+  runGit: RunGit,
+  localPath: string,
+  credentials: GitCredentials | null,
+  log: (line: string) => void,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const fetched = await runGit(localPath, ["fetch", "origin", "--prune"], credentials);
+  if (fetched.code === 0) return fetched;
+
+  const stale = staleRemoteTrackingRefs(`${fetched.stderr}\n${fetched.stdout}`);
+  if (stale.length === 0) return fetched;
+
+  log(
+    `Remote-tracking ref changed during fetch (${stale.join(", ")}); clearing it and fetching again`,
+  );
+  for (const ref of stale) {
+    const deleted = await runGit(localPath, ["update-ref", "-d", ref], credentials);
+    if (deleted.code !== 0) return fetched;
+  }
+  return runGit(localPath, ["fetch", "origin", "--prune"], credentials);
+}
+
 /**
  * Bring a *user-configured* checkout up to date without discarding uncommitted work.
  *
@@ -614,7 +651,7 @@ export async function ensureUserWorkspace(
 
   log(`Updating workspace at ${localPath} (fast-forward only)`);
 
-  const fetched = await runGit(localPath, ["fetch", "origin", "--prune"], input.credentials);
+  const fetched = await fetchOriginPrune(runGit, localPath, input.credentials, log);
   if (fetched.code !== 0) {
     return { ok: false, reason: `git fetch failed: ${redactSecrets(fetched.stderr, secrets)}` };
   }
@@ -715,6 +752,15 @@ export async function ensureUserWorkspace(
   return { ok: true, created: false, headSha: head.code === 0 ? head.stdout.trim() : null };
 }
 
+/**
+ * Make `localPath` a usable checkout of `cloneUrl`.
+ *
+ *  - absent, or exists empty -> git clone (git clones into an empty directory
+ *    exactly like a fresh one)
+ *  - existing repo   -> fetch + reset --hard to the remote default branch
+ *  - existing non-empty, non-repo -> fail loudly; never delete a directory we
+ *    did not create
+ */
 export async function ensureManagedClone(
   input: EnsureManagedCloneInput,
 ): Promise<EnsureManagedCloneResult> {
@@ -758,7 +804,7 @@ export async function ensureManagedClone(
 
   log(`Refreshing existing managed workspace at ${localPath}`);
 
-  const fetched = await runGit(localPath, ["fetch", "origin", "--prune"], input.credentials);
+  const fetched = await fetchOriginPrune(runGit, localPath, input.credentials, log);
   if (fetched.code !== 0) {
     return { ok: false, reason: `git fetch failed: ${redactSecrets(fetched.stderr, secrets)}` };
   }
