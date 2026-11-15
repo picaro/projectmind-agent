@@ -12,6 +12,7 @@ import {
   ensureManagedEmptyWorkspace,
   ensureUserWorkspace,
   resolveArchiveEntryPath,
+  staleRemoteTrackingRefs,
   gitEnvWithCredentials,
   resolveManagedRoot,
   restoreWorkspaceDefaultBranch,
@@ -881,6 +882,80 @@ describe("ensureUserWorkspace", () => {
 
     expect(result).toEqual({ ok: true, created: false, headSha: "local123" });
     expect(calls.map((c) => c.join(" ")).some((c) => c.startsWith("fetch"))).toBe(false);
+  });
+
+  it("clears a remote-tracking ref that another fetch already moved, then fetches again", async () => {
+    const target = path.join(tmpRoot, "user-stale-ref");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+    const stale =
+      "From https://github.com/org/app\n" +
+      "error: cannot lock ref 'refs/remotes/origin/main': is at 7f49902369ff4bf245db862024e6d2441f1c85e7 but expected 38132e301821f9a4456430661a45eca439a0454c\n" +
+      " ! 38132e301..7f4990236  main       -> origin/main  (unable to update local ref)\n";
+    let fetches = 0;
+    const calls: string[][] = [];
+    const runGit: RunGit = async (_cwd, args) => {
+      calls.push(args);
+      if (args[0] === "fetch") {
+        fetches += 1;
+        if (fetches === 1) return { code: 1, stdout: "", stderr: stale };
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n", stderr: "" };
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        return { code: 0, stdout: "main\n", stderr: "" };
+      }
+      if (args[0] === "rev-parse") return { code: 0, stdout: "cafe123\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+
+    const result = await ensureUserWorkspace({
+      localPath: target,
+      cloneUrl: "https://github.com/org/app.git",
+      defaultBranch: "main",
+      credentials,
+      runGit,
+    });
+
+    expect(result).toEqual({ ok: true, created: false, headSha: "cafe123" });
+    expect(calls).toContainEqual(["update-ref", "-d", "refs/remotes/origin/main"]);
+    expect(calls.filter((args) => args[0] === "fetch")).toHaveLength(2);
+    expect(calls.some((args) => args[0] === "reset")).toBe(false);
+  });
+
+  it("does not clear refs when fetch fails for another reason", async () => {
+    const target = path.join(tmpRoot, "user-auth-fail");
+    fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+    const calls: string[][] = [];
+    const runGit: RunGit = async (_cwd, args) => {
+      calls.push(args);
+      if (args[0] === "remote") return { code: 0, stdout: "https://github.com/org/app.git\n", stderr: "" };
+      if (args[0] === "fetch") {
+        return { code: 128, stdout: "", stderr: "fatal: Authentication failed for 'https://github.com/org/app.git'\n" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+
+    const result = await ensureUserWorkspace({
+      localPath: target,
+      cloneUrl: "https://github.com/org/app.git",
+      defaultBranch: "main",
+      credentials,
+      runGit,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("Authentication failed");
+    expect(calls.filter((args) => args[0] === "fetch")).toHaveLength(1);
+    expect(calls.some((args) => args[0] === "update-ref")).toBe(false);
+  });
+});
+
+describe("staleRemoteTrackingRefs", () => {
+  it("returns only remote-tracking refs from the lock error", () => {
+    const text =
+      "error: cannot lock ref 'refs/remotes/origin/main': is at abcdef but expected 111111\n" +
+      "error: cannot lock ref 'refs/heads/main': is at abcdef but expected 111111\n";
+    expect(staleRemoteTrackingRefs(text)).toEqual(["refs/remotes/origin/main"]);
   });
 });
 
