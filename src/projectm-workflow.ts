@@ -176,6 +176,7 @@ export async function runProjectmWorkflowJob(
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "pm-workflow-")));
   const dockerConfig = join(dir, ".docker");
   let renewTimer: ReturnType<typeof setInterval> | null = null;
+  let logFlush: ReturnType<typeof setInterval> | null = null;
 
   try {
     writeFileSync(join(dir, ".pm-steps.sh"), workflow.stepScript, {
@@ -209,15 +210,38 @@ export async function runProjectmWorkflowJob(
     );
 
     const tail: string[] = [];
+    const pending: string[] = [];
+    let flushChain: Promise<void> = Promise.resolve();
+    const uploadPending = () => {
+      if (pending.length === 0) return;
+      const body = maskOutput(pending.splice(0).join("\n"), workflow.secrets)
+        .slice(-4000)
+        .trim();
+      if (!body) return;
+      flushChain = flushChain.then(() =>
+        call(client, "appendAgentJobEvent", {
+          jobId: job.id,
+          agentKey,
+          kind: "log",
+          message: body.slice(0, 7500),
+        }).then(
+          () => undefined,
+          (err: unknown) => log(`log upload failed: ${String(err)}`),
+        ),
+      );
+    };
     const onData = (chunk: Buffer) => {
-      for (const line of chunk.toString().split("\n")) {
+      for (const line of chunk.toString().split(/\r?\n/)) {
         if (!line) continue;
         tail.push(line);
         if (tail.length > OUTPUT_TAIL_LINES) tail.shift();
+        pending.push(line);
+        if (pending.length >= 20) uploadPending();
       }
     };
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
+    logFlush = setInterval(uploadPending, 2_000);
 
     let abortReason: string | null = null;
     const kill = (reason: string) => {
@@ -257,6 +281,9 @@ export async function runProjectmWorkflowJob(
       child.on("close", (code) => resolve(code));
     });
     clearTimeout(timeout);
+    clearInterval(logFlush);
+    uploadPending();
+    await flushChain;
 
     const output = maskOutput(tail.join("\n"), workflow.secrets)
       .slice(-OUTPUT_TAIL_MAX_CHARS)
@@ -288,6 +315,7 @@ export async function runProjectmWorkflowJob(
     });
   } finally {
     if (renewTimer) clearInterval(renewTimer);
+    if (logFlush) clearInterval(logFlush);
     rmSync(dir, { recursive: true, force: true });
   }
 }

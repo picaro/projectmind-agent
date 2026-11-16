@@ -70,6 +70,16 @@ describe("projectm workflow jobs on the Mac", () => {
       },
     );
     expect(outcome).toMatchObject({ status: "succeeded", exitCode: 0 });
+    expect(call).toHaveBeenCalledWith(
+      client,
+      "appendAgentJobEvent",
+      expect.objectContaining({
+        jobId: "job-1",
+        agentKey: "host:Mac",
+        kind: "log",
+        message: expect.stringContaining("DOCKER_HOST="),
+      }),
+    );
     expect(call).toHaveBeenCalledWith(client, "completeAgentJob", {
       jobId: "job-1",
       agentKey: "host:Mac",
