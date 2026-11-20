@@ -35,9 +35,9 @@ afterEach(async () => {
 });
 
 describe("approvalUrl", () => {
-  it("opens Settings → Computers with the code prefilled", () => {
-    expect(approvalUrl("https://projectm.dev", CODE)).toBe(
-      "https://projectm.dev/settings?tab=computers&pairCode=ABCD-EFGH",
+  it("opens the Computers approval form without the code in the URL", () => {
+    expect(approvalUrl("https://projectm.dev")).toBe(
+      "https://projectm.dev/hosting?tab=computers&approveComputer=1",
     );
   });
 });
@@ -89,7 +89,8 @@ describe("devicePair", () => {
       body: { code: CODE, sessionId: SESSION },
     });
     expect(time.waits).toEqual([PAIR_POLL_INTERVAL_MS / 2, PAIR_POLL_INTERVAL_MS, 45_000]);
-    expect(opened).toEqual(["http://127.0.0.1:8080/settings?tab=computers&pairCode=ABCD-EFGH"]);
+    expect(opened).toEqual(["http://127.0.0.1:8080/hosting?tab=computers&approveComputer=1"]);
+    expect(opened[0]).not.toContain(CODE);
     expect(out).toContain("Pairing code: ABCD-EFGH");
     expect(out).not.toContain(TOKEN);
     expect(await readState(dir)).toMatchObject({

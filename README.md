@@ -59,11 +59,11 @@ projectmind-agent help     # Show help information
 ProjectMind can deploy apps to your own computer. One-time setup:
 
 ```bash
-projectmind-agent node pair    # opens Settings → Computers to approve this computer
+projectmind-agent node pair    # prints a code; enter it on Hosting → Computers
 projectmind-agent              # job loop + local-cloud node
 ```
 
-`node pair` creates a pairing code, opens the approval page in your browser, and saves the device credential to `~/.imemory/personal-node` (mode 0600) once you approve. The server is the origin of `IMEMORY_MCP_URL`, so a local dev agent pairs with your local server. The Computers page can also copy a ready-made `npx -y projectmind-agent@latest node pair --server … --session-id … --code …` command.
+`node pair` prints a pairing code and opens Hosting → Computers, where you type the code to approve this computer (the code is never put in the URL). Once approved, the device credential is saved to `~/.imemory/personal-node` (mode 0600). The server is the origin of `IMEMORY_MCP_URL`, so a local dev agent pairs with your local server. The Computers page can also copy a ready-made `npx -y projectmind-agent@latest node pair --server … --session-id … --code …` command.
 
 After pairing, a plain `projectmind-agent` also starts `node run` as a supervised child process. It restarts the node with backoff if it crashes, and stops for good if the computer is revoked. To run only the node, without the job loop or an API key, use `projectmind-agent node run`.
 

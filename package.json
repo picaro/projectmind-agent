@@ -10,6 +10,8 @@
   },
   "files": [
     "dist",
+    "src/personal-node",
+    "!src/personal-node/**/*.test.ts",
     "README.md",
     "LICENSE"
   ],

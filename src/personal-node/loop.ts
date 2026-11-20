@@ -25,7 +25,7 @@ import {
 } from "./types.ts";
 
 const UNKNOWN_COMMAND_REASON =
-  "This computer does not understand this command. On that Mac, update projectmind-agent (npm i -g projectmind-agent@latest) and restart it, or run the command from Settings → Computers.";
+  "This computer does not understand this command. On that Mac, update projectmind-agent (npm i -g projectmind-agent@latest) and restart it, or run the command from Hosting → Computers.";
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 30_000;

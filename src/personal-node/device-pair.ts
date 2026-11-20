@@ -32,11 +32,14 @@ export function pairingPlatform(platform: NodeJS.Platform = process.platform): s
   return "other";
 }
 
-/** Settings → Computers with the code prefilled for the owner to approve. */
-export function approvalUrl(server: string, code: string): string {
-  const url = new URL("/settings", server);
+/**
+ * Hosting → Computers with the approval form open. The code is not in the URL:
+ * the owner types it, so a forwarded link cannot approve someone else's computer.
+ */
+export function approvalUrl(server: string): string {
+  const url = new URL("/hosting", server);
   url.searchParams.set("tab", "computers");
-  url.searchParams.set("pairCode", code);
+  url.searchParams.set("approveComputer", "1");
   return url.toString();
 }
 
@@ -96,9 +99,9 @@ export async function devicePair(
     typeof session.expiresInSeconds === "number" ? session.expiresInSeconds * 1000 : 600_000;
   const deadline = now() + ttlMs;
 
-  const url = approvalUrl(server, code);
+  const url = approvalUrl(server);
   stdout(`Pairing code: ${code}\n`);
-  stdout(`Approve this computer while signed in to ProjectMind:\n  ${url}\n`);
+  stdout(`Approve this computer by entering the code while signed in to ProjectMind:\n  ${url}\n`);
   stdout("Waiting for approval (Ctrl-C to cancel)…\n");
   deps.openUrl?.(url);
 
