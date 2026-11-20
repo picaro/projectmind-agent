@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +16,14 @@ function stateDir(): string {
 }
 
 function deps(pid: number, overrides: Partial<RunLockDeps> = {}): RunLockDeps {
-  return { pid, isAlive: () => true, bootedAt: () => BOOT, now: () => NOW, ...overrides };
+  return {
+    pid,
+    isAlive: () => true,
+    bootedAt: () => BOOT,
+    bootId: () => null,
+    now: () => NOW,
+    ...overrides,
+  };
 }
 
 function owner(dir: string): { pid: number; bootedAt: number } {
@@ -79,6 +86,28 @@ describe("acquireRunLock", () => {
     const b = acquireRunLock(dir, deps(300, { isAlive: (pid) => !dead(pid) }));
     expect("release" in a).toBe(true);
     expect(b).toEqual({ heldBy: 200 });
+  });
+
+  it("keeps a live lock across a clock jump when the boot id matches", () => {
+    const dir = stateDir();
+    writeFileSync(
+      runLockPath(dir),
+      JSON.stringify({ pid: 100, bootedAt: BOOT - 3_600_000, bootId: "boot-a" }),
+    );
+    expect(acquireRunLock(dir, deps(200, { bootId: () => "boot-a" }))).toEqual({ heldBy: 100 });
+    const rebooted = acquireRunLock(dir, deps(200, { bootId: () => "boot-b" }));
+    expect("release" in rebooted).toBe(true);
+  });
+
+  it("clears a takeover guard left by a runner that died mid-takeover", () => {
+    const dir = stateDir();
+    writeFileSync(runLockPath(dir), JSON.stringify({ pid: 100, bootedAt: BOOT }));
+    mkdirSync(`${runLockPath(dir)}.takeover`);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${runLockPath(dir)}.takeover`, old, old);
+    const lock = acquireRunLock(dir, deps(200, { isAlive: () => false, now: () => Date.now() }));
+    expect("release" in lock).toBe(true);
+    expect(readdirSync(dir)).toEqual(["run.lock"]);
   });
 
   it("does not remove a lock another runner took over", () => {

@@ -3,7 +3,11 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
-import { NODE_EXIT_ALREADY_RUNNING, SUPERVISOR_PID_ENV } from "./run-lock.ts";
+import {
+  NODE_EXIT_ALREADY_RUNNING,
+  NODE_EXIT_NEEDS_PAIRING,
+  SUPERVISOR_PID_ENV,
+} from "./run-lock.ts";
 import {
   NODE_EXIT_REVOKED,
   NodeSupervisor,
@@ -167,5 +171,17 @@ describe("NodeSupervisor with another runner", () => {
     h.timers.at(-1)?.fn();
     expect(h.spawned).toHaveLength(3);
     void h.supervisor.stop(10);
+  });
+});
+
+describe("NodeSupervisor with a broken pairing", () => {
+  it("stops instead of restarting when the state needs a new pairing", () => {
+    const h = harness();
+    h.supervisor.start();
+    h.children[0]?.emit("exit", NODE_EXIT_NEEDS_PAIRING);
+    expect(h.timers).toHaveLength(0);
+    expect(h.logs.at(-1)).toContain("node pair --force");
+    h.supervisor.start();
+    expect(h.spawned).toHaveLength(1);
   });
 });

@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { spawn } = vi.hoisted(() => ({
-  spawn: vi.fn(() => ({ unref() {} })),
+  spawn: vi.fn(() => ({ on() {}, unref() {} })),
 }));
 
 vi.mock("node:child_process", () => ({
   spawn,
 }));
 
-import { runDeviceLogin, upsertEnvVar } from "./device-login.js";
+import { browserCommand, runDeviceLogin, upsertEnvVar } from "./device-login.js";
 
 describe("upsertEnvVar", () => {
   it("inserts into an empty file and keeps a trailing newline", () => {
@@ -193,5 +193,17 @@ describe("runDeviceLogin", () => {
     await flushStart();
     await vi.advanceTimersByTimeAsync(2_000);
     await expect(pending).resolves.toEqual({ success: false, envPath });
+  });
+});
+
+describe("browserCommand", () => {
+  it("opens a URL with & on every platform without a shell", () => {
+    const url = "https://projectm.dev/hosting?tab=computers&approveComputer=1";
+    expect(browserCommand("darwin", url)).toEqual(["open", [url]]);
+    expect(browserCommand("linux", url)).toEqual(["xdg-open", [url]]);
+    expect(browserCommand("win32", url)).toEqual([
+      "rundll32",
+      ["url.dll,FileProtocolHandler", url],
+    ]);
   });
 });

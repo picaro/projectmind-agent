@@ -16,12 +16,19 @@ export type DeviceLoginResult = {
   envPath: string;
 };
 
+/** No shell: `cmd /c start` would split a URL at `&`. */
+export function browserCommand(platform: NodeJS.Platform, url: string): [string, string[]] {
+  if (platform === "darwin") return ["open", [url]];
+  if (platform === "win32") return ["rundll32", ["url.dll,FileProtocolHandler", url]];
+  return ["xdg-open", [url]];
+}
+
 export function openBrowser(url: string) {
-  const platform = process.platform;
-  if (platform === "darwin") spawn("open", [url], { stdio: "ignore", detached: true }).unref();
-  else if (platform === "win32")
-    spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true }).unref();
-  else spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref();
+  const [command, args] = browserCommand(process.platform, url);
+  const child = spawn(command, args, { stdio: "ignore", detached: true });
+  // A missing opener (no xdg-open on a server) is not fatal: the URL is printed too.
+  child.on("error", () => {});
+  child.unref();
 }
 
 function originFromMcpUrl(mcpUrl: string): string {

@@ -74,6 +74,7 @@ describe("devicePair", () => {
           exchanges += 1;
           if (exchanges === 1) return json({ error: "not_approved", message: "x" }, 409);
           if (exchanges === 2) return json({ error: "rate_limited" }, 429, { "retry-after": "45" });
+          if (exchanges === 3) return new Response("<html>Bad gateway</html>", { status: 502 });
           return json({ nodeId: NODE, deviceToken: TOKEN, tokenType: "PersonalNode" });
         }) as typeof fetch,
       },
@@ -88,7 +89,12 @@ describe("devicePair", () => {
       url: "http://127.0.0.1:8080/api/personal-nodes/pairing-sessions/exchange",
       body: { code: CODE, sessionId: SESSION },
     });
-    expect(time.waits).toEqual([PAIR_POLL_INTERVAL_MS / 2, PAIR_POLL_INTERVAL_MS, 45_000]);
+    expect(time.waits).toEqual([
+      PAIR_POLL_INTERVAL_MS / 2,
+      PAIR_POLL_INTERVAL_MS,
+      45_000,
+      PAIR_POLL_INTERVAL_MS,
+    ]);
     expect(opened).toEqual(["http://127.0.0.1:8080/hosting?tab=computers&approveComputer=1"]);
     expect(opened[0]).not.toContain(CODE);
     expect(out).toContain("Pairing code: ABCD-EFGH");

@@ -2,7 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 
 import { defaultStateDir } from "./command.ts";
-import { NODE_EXIT_ALREADY_RUNNING, SUPERVISOR_PID_ENV } from "./run-lock.ts";
+import {
+  NODE_EXIT_ALREADY_RUNNING,
+  NODE_EXIT_NEEDS_PAIRING,
+  SUPERVISOR_PID_ENV,
+} from "./run-lock.ts";
 import { stateFilePath } from "./state.ts";
 
 /** `node run` exits 3 when the control plane revoked this computer. */
@@ -124,6 +128,13 @@ export class NodeSupervisor {
       this.stopped = true;
       this.log(
         "[node] this computer was revoked or its credential was rejected. Pair it again with `projectmind-agent node pair --force`.",
+      );
+      return;
+    }
+    if (code === NODE_EXIT_NEEDS_PAIRING) {
+      this.stopped = true;
+      this.log(
+        "[node] this computer's pairing is missing or unreadable. Pair it again with `projectmind-agent node pair --force`.",
       );
       return;
     }

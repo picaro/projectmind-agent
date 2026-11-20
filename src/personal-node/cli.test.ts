@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { main } from "./cli.js";
 import { buildHeartbeat } from "./heartbeat.js";
-import { NODE_EXIT_ALREADY_RUNNING, runLockPath } from "./run-lock.js";
+import { NODE_EXIT_ALREADY_RUNNING, NODE_EXIT_NEEDS_PAIRING, runLockPath } from "./run-lock.js";
 import { readState, stateFilePath, writeState } from "./state.js";
 
 const NODE = "550e8400-e29b-41d4-a716-446655440010";
@@ -367,8 +367,26 @@ describe("personal-node-agent cli", () => {
         },
       },
     );
-    expect(ran).toBe(1);
+    expect(ran).toBe(NODE_EXIT_NEEDS_PAIRING);
     expect(err).toContain("Saved personal node state has no server origin");
     expect(err).not.toContain(TOKEN);
+  });
+
+  it("run reports a corrupt state file as needing a new pairing", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pna-cli-"));
+    await writeFile(stateFilePath(dir), "{not json");
+    let err = "";
+    const ran = await main(
+      ["run", "--once", "--state-dir", dir],
+      { IMEMORY_PERSONAL_NODE_DOCKER: "0" },
+      {
+        stderr: (line) => {
+          err += line;
+        },
+      },
+    );
+    expect(ran).toBe(NODE_EXIT_NEEDS_PAIRING);
+    expect(err).toContain("is invalid");
+    expect(err).toContain("node pair --force");
   });
 });

@@ -141,6 +141,8 @@ export async function devicePair(
       wait = Math.max(PAIR_POLL_INTERVAL_MS, retryAfterMs(response, PAIR_POLL_INTERVAL_MS));
       continue;
     }
+    // A deploy or a bad moment on the server; the code is still valid until the deadline.
+    if (response.status >= 500) continue;
     const failure = await readError(response);
     if (failure.error === "not_approved") continue;
     throw new Error(
