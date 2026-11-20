@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, uptime } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -324,7 +324,10 @@ describe("personal-node-agent cli", () => {
       server: "http://127.0.0.1:8080",
       completedCommandIds: [],
     });
-    await writeFile(runLockPath(dir), `${process.ppid}\n`);
+    await writeFile(
+      runLockPath(dir),
+      JSON.stringify({ pid: process.ppid, bootedAt: Math.round(Date.now() - uptime() * 1000) }),
+    );
     let err = "";
     let fetched = 0;
     const ran = await main(
@@ -343,7 +346,7 @@ describe("personal-node-agent cli", () => {
     expect(ran).toBe(NODE_EXIT_ALREADY_RUNNING);
     expect(err).toContain(`another node run (pid ${process.ppid})`);
     expect(fetched).toBe(0);
-    expect((await readFile(runLockPath(dir), "utf8")).trim()).toBe(String(process.ppid));
+    expect(JSON.parse(await readFile(runLockPath(dir), "utf8")).pid).toBe(process.ppid);
   });
 
   it("run without a saved server origin explains that pair must store one", async () => {
