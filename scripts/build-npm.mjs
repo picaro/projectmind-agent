@@ -7,6 +7,7 @@ import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { buildPersonalNodeBundle, personalNodeBuildStamp } from "./build-personal-node.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentRoot = resolve(__dirname, "..");
@@ -41,12 +42,16 @@ async function main() {
     define: {
       "process.env.IMEMORY_AGENT_EMBEDDED_VERSION": JSON.stringify(version),
       "process.env.IMEMORY_AGENT_EMBEDDED_BUILD_DATE": JSON.stringify(buildDate),
+      __PERSONAL_NODE_AGENT_BUILD__: JSON.stringify(personalNodeBuildStamp()),
     },
     logLevel: "info",
   });
 
   await chmod(outFile, 0o755);
   console.log(`Successfully built ${outFile}`);
+
+  const nodeBundle = await buildPersonalNodeBundle(resolve(distDir, "personal-node.mjs"));
+  console.log(`Successfully built ${nodeBundle}`);
 }
 
 main().catch((err) => {

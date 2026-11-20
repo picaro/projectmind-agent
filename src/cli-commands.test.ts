@@ -34,7 +34,46 @@ vi.mock("./health-check.js", () => ({
   runHealthCheck: async () => healthResults.rows,
 }));
 
-import { parseCliCommand, runDoctorCommand, runTestCommand, showVersion } from "./cli-commands.js";
+vi.mock("./personal-node/command.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./personal-node/command.ts")>()),
+  collectNodeStatus: async () => ({
+    paired: null,
+    docker: { enabled: true, socketPath: "/var/run/docker.sock", reachable: false },
+    cloudflared: null,
+  }),
+}));
+
+import {
+  parseCliCommand,
+  personalNodeIssues,
+  runDoctorCommand,
+  runTestCommand,
+  showVersion,
+} from "./cli-commands.js";
+
+describe("personalNodeIssues", () => {
+  const docker = { enabled: true, socketPath: "/var/run/docker.sock", reachable: true };
+  it("is informational when the node is not paired", () => {
+    expect(personalNodeIssues({ paired: null, docker, cloudflared: null })).toEqual([
+      expect.objectContaining({ category: "info", fix: expect.stringContaining("node pair") }),
+    ]);
+  });
+
+  it("warns when a paired node has no Docker socket", () => {
+    const paired = { nodeId: "n1", server: null };
+    expect(
+      personalNodeIssues({ paired, docker: { ...docker, reachable: false }, cloudflared: null }),
+    ).toEqual([expect.objectContaining({ category: "warning" })]);
+    expect(personalNodeIssues({ paired, docker, cloudflared: null })).toEqual([]);
+    expect(
+      personalNodeIssues({
+        paired,
+        docker: { enabled: false, socketPath: "", reachable: false },
+        cloudflared: null,
+      }),
+    ).toEqual([]);
+  });
+});
 
 describe("parseCliCommand", () => {
   it("treats an empty argv as the long-running agent", () => {
@@ -46,6 +85,10 @@ describe("parseCliCommand", () => {
     expect(parseCliCommand(["exec-job", "--jobId", "abc"])).toEqual({
       command: "exec-job",
       args: ["--jobId", "abc"],
+    });
+    expect(parseCliCommand(["node", "pair", "--force"])).toEqual({
+      command: "node",
+      args: ["pair", "--force"],
     });
   });
 

@@ -21,12 +21,16 @@ export function parseExecJobArgs(args: string[]): { jobId: string } | { error: s
   return { error: "exec-job requires --jobId <uuid>" };
 }
 
+/** How to re-invoke this agent binary as a one-shot worker. */
+export function resolveExecJobSpawnSpec(jobId: string): ChildJobSpawnSpec {
+  return resolveSelfSpawnSpec(buildExecJobArgv(jobId));
+}
+
 /**
- * How to re-invoke this agent binary as a one-shot worker.
+ * How to re-invoke this agent binary with other arguments.
  * Packaged binaries are `process.execPath`; node/tsx runs keep argv[1] as the entry.
  */
-export function resolveExecJobSpawnSpec(jobId: string): ChildJobSpawnSpec {
-  const extra = buildExecJobArgv(jobId);
+export function resolveSelfSpawnSpec(extra: string[]): ChildJobSpawnSpec {
   const entry = process.argv[1]?.trim() ?? "";
   if (entry && (entry.endsWith(".js") || entry.endsWith(".cjs") || entry.endsWith(".ts") || entry.endsWith(".mjs"))) {
     return { command: process.execPath, args: [entry, ...extra] };

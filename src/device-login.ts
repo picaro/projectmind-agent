@@ -16,7 +16,7 @@ export type DeviceLoginResult = {
   envPath: string;
 };
 
-function openBrowser(url: string) {
+export function openBrowser(url: string) {
   const platform = process.platform;
   if (platform === "darwin") spawn("open", [url], { stdio: "ignore", detached: true }).unref();
   else if (platform === "win32")
