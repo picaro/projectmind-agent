@@ -29,16 +29,26 @@ export function resolveExecJobSpawnSpec(jobId: string): ChildJobSpawnSpec {
 
 const SCRIPT_ENTRY = /\.(?:c|m)?(?:js|ts)$/;
 
+/** A child must not bind the parent's debugger port. */
+const INSPECTOR_FLAG = /^--inspect(?:-brk|-port|-wait)?(?:=|$)/;
+
 /**
  * How to re-invoke this agent binary with other arguments.
- * Packaged binaries are `process.execPath`; node/tsx runs keep argv[1] as the entry.
+ * Packaged binaries are `process.execPath`; node/tsx runs keep argv[1] as the entry,
+ * plus Node's own flags (tsx's loader lives there, and the .ts sources need it).
  * npm and npx put an extensionless bin symlink in argv[1], so the link is resolved first.
  */
 export function resolveSelfSpawnSpec(
   extra: string[],
-  runtime: { argv?: string[]; execPath?: string; realpath?: (path: string) => string } = {},
+  runtime: {
+    argv?: string[];
+    execArgv?: string[];
+    execPath?: string;
+    realpath?: (path: string) => string;
+  } = {},
 ): ChildJobSpawnSpec {
   const argv = runtime.argv ?? process.argv;
+  const nodeFlags = (runtime.execArgv ?? process.execArgv).filter((flag) => !INSPECTOR_FLAG.test(flag));
   const execPath = runtime.execPath ?? process.execPath;
   const realpath = runtime.realpath ?? realpathSync;
   const raw = argv[1]?.trim() ?? "";
@@ -51,7 +61,7 @@ export function resolveSelfSpawnSpec(
     }
   }
   if (entry && SCRIPT_ENTRY.test(entry)) {
-    return { command: execPath, args: [entry, ...extra] };
+    return { command: execPath, args: [...nodeFlags, entry, ...extra] };
   }
   return { command: execPath, args: extra };
 }

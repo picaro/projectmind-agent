@@ -39,7 +39,11 @@ describe("child-jobs", () => {
       writeFileSync(script, "");
       const bin = join(dir, "projectmind-agent");
       symlinkSync(script, bin);
-      const spec = resolveSelfSpawnSpec(["node", "run"], { argv: ["/usr/bin/node", bin], execPath: "/usr/bin/node" });
+      const spec = resolveSelfSpawnSpec(["node", "run"], {
+        argv: ["/usr/bin/node", bin],
+        execArgv: [],
+        execPath: "/usr/bin/node",
+      });
       expect(spec).toEqual({ command: "/usr/bin/node", args: [realpathSync(script), "node", "run"] });
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -53,9 +57,23 @@ describe("child-jobs", () => {
       realpath: (path) => path,
     });
     expect(spec).toEqual({ command: "/opt/projectmind-agent", args: ["node", "run"] });
-    expect(
-      resolveSelfSpawnSpec(["x"], { argv: ["/usr/bin/node", "/src/index.ts"], execPath: "/usr/bin/node" }).args,
-    ).toEqual(["/src/index.ts", "x"]);
+  });
+
+  it("keeps the tsx loader when re-invoking a TypeScript entry", () => {
+    const spec = resolveSelfSpawnSpec(["node", "run"], {
+      argv: ["/usr/bin/node", "/src/index.ts"],
+      execArgv: ["--require", "/tsx/preflight.cjs", "--import", "file:///tsx/loader.mjs", "--inspect=9229"],
+      execPath: "/usr/bin/node",
+    });
+    expect(spec.args).toEqual([
+      "--require",
+      "/tsx/preflight.cjs",
+      "--import",
+      "file:///tsx/loader.mjs",
+      "/src/index.ts",
+      "node",
+      "run",
+    ]);
   });
 
   it("caps in-flight child workers", () => {
