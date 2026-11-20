@@ -31,6 +31,7 @@ The ProjectMind Agent runs on your machine and:
 - **Connects** to ProjectMind via secure heartbeat
 - **Claims** coding tasks queued from the web interface
 - **Executes** tasks using AI assistants (Cursor, Claude, Codex, etc.)
+- **Hosts apps locally** (optional): once this computer is paired as a local-cloud node, the agent also runs deploys in Docker and the outbound cloudflared tunnel
 - **Auto-updates** when new versions are released
 
 All work happens in directories you explicitly allow, with full control over what the agent can access.
@@ -48,8 +49,35 @@ projectmind-agent setup    # Run interactive configuration wizard
 projectmind-agent doctor   # Check configuration and diagnose issues
 projectmind-agent test     # Test all configured AI assistants
 projectmind-agent runners  # List available AI assistant integrations
+projectmind-agent node pair    # Pair this computer for local cloud (one time)
+projectmind-agent node status  # Pairing, Docker socket and cloudflared
 projectmind-agent help     # Show help information
 ```
+
+## Local cloud (personal hosting node)
+
+ProjectMind can deploy apps to your own computer. One-time setup:
+
+```bash
+projectmind-agent node pair    # prints a code; enter it on Hosting → Computers
+projectmind-agent              # job loop + local-cloud node
+```
+
+`node pair` prints a pairing code and opens Hosting → Computers, where you type the code to approve this computer (the code is never put in the URL). Once approved, the device credential is saved to `~/.imemory/personal-node` (mode 0600). The server is the origin of `IMEMORY_MCP_URL`, so a local dev agent pairs with your local server. The Computers page can also copy a ready-made `npx -y projectmind-agent@latest node pair --server … --session-id … --code …` command.
+
+After pairing, a plain `projectmind-agent` also starts `node run` as a supervised child process. It restarts the node with backoff if it crashes, and stops for good if the computer is revoked. To run only the node, without the job loop or an API key, use `projectmind-agent node run`.
+
+Docker is found automatically: `/var/run/docker.sock`, Docker Desktop (`~/.docker/run/docker.sock`), OrbStack, Colima and Rancher Desktop are tried in that order, and checked again on every cycle, so Docker can start after the agent. cloudflared is used from `PATH`, or the pinned release is downloaded into `~/.imemory/personal-node/bin` and its checksum is checked.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `IMEMORY_PERSONAL_NODE_AUTOSTART` | `1` | `0` stops plain `projectmind-agent` from starting the node |
+| `IMEMORY_PERSONAL_NODE_DOCKER` | `1` | `0` turns the container runtime off (deploys are validated only) |
+| `IMEMORY_PERSONAL_NODE_DOCKER_SOCKET` | auto | Use only this socket |
+| `IMEMORY_PERSONAL_NODE_SERVER` | `IMEMORY_MCP_URL` origin | Control plane for `node pair` |
+| `IMEMORY_PERSONAL_NODE_STATE_DIR` | `~/.imemory/personal-node` | Device credential and command state |
+
+Computers paired with the older `node /tmp/projectmind-node.mjs` command keep working: the state directory is the same.
 
 ## Product direction
 

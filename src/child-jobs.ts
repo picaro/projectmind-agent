@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { realpathSync } from "node:fs";
 
 export type ChildJobSpawnSpec = {
   command: string;
@@ -21,17 +22,38 @@ export function parseExecJobArgs(args: string[]): { jobId: string } | { error: s
   return { error: "exec-job requires --jobId <uuid>" };
 }
 
-/**
- * How to re-invoke this agent binary as a one-shot worker.
- * Packaged binaries are `process.execPath`; node/tsx runs keep argv[1] as the entry.
- */
+/** How to re-invoke this agent binary as a one-shot worker. */
 export function resolveExecJobSpawnSpec(jobId: string): ChildJobSpawnSpec {
-  const extra = buildExecJobArgv(jobId);
-  const entry = process.argv[1]?.trim() ?? "";
-  if (entry && (entry.endsWith(".js") || entry.endsWith(".cjs") || entry.endsWith(".ts") || entry.endsWith(".mjs"))) {
-    return { command: process.execPath, args: [entry, ...extra] };
+  return resolveSelfSpawnSpec(buildExecJobArgv(jobId));
+}
+
+const SCRIPT_ENTRY = /\.(?:c|m)?(?:js|ts)$/;
+
+/**
+ * How to re-invoke this agent binary with other arguments.
+ * Packaged binaries are `process.execPath`; node/tsx runs keep argv[1] as the entry.
+ * npm and npx put an extensionless bin symlink in argv[1], so the link is resolved first.
+ */
+export function resolveSelfSpawnSpec(
+  extra: string[],
+  runtime: { argv?: string[]; execPath?: string; realpath?: (path: string) => string } = {},
+): ChildJobSpawnSpec {
+  const argv = runtime.argv ?? process.argv;
+  const execPath = runtime.execPath ?? process.execPath;
+  const realpath = runtime.realpath ?? realpathSync;
+  const raw = argv[1]?.trim() ?? "";
+  let entry = raw;
+  if (raw && !SCRIPT_ENTRY.test(raw)) {
+    try {
+      entry = realpath(raw);
+    } catch {
+      // Not a file (a packaged binary's first argument): fall through.
+    }
   }
-  return { command: process.execPath, args: extra };
+  if (entry && SCRIPT_ENTRY.test(entry)) {
+    return { command: execPath, args: [entry, ...extra] };
+  }
+  return { command: execPath, args: extra };
 }
 
 export function maxChildWorkers(maxConcurrentChildren?: number | null): number {

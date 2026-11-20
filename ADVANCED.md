@@ -262,6 +262,18 @@ export { expect };
 - Antigravity CLI uses `--dangerously-skip-permissions` (set `IMEMORY_ANTIGRAVITY_SKIP_PERMISSIONS=0` to disable) and `--mode accept-edits`
 - LLM shell tool stays cwd-scoped and blocks pipes, network binaries, sudo, recursive rm, absolute redirects, and interpreter one-liners (still a denylist — use Cursor/Codex/Antigravity for stronger sandboxing)
 
+## Local cloud node (`src/personal-node/`)
+
+The personal-hosting node runtime lives in `src/personal-node/`. The user-facing setup is in the README ("Local cloud"). Notes for working on it:
+
+- **Separate credential.** The node authenticates with a `pnd_` device token from `node pair`, not with `IMEMORY_API_KEY`. `node run` works without the job loop or an API key.
+- **Process model.** Plain `projectmind-agent` spawns itself as `node run` (`supervisor.ts`), so Docker or cloudflared failures cannot take down the job loop. Exit code 3 means the computer was revoked, and the supervisor does not restart after it.
+- **Executor safety.** Deploy payloads are checked again on the computer: sha256 digest, platform, no privileged mode, no host network or PID, no `docker.sock` or host mounts, no shell string. Docker argv is passed with `shell: false`. Containers publish on `127.0.0.1` only. Secrets are redeemed once into a mode-0600 `--env-file` that is deleted afterwards.
+- **No public URL from the agent.** The node never reports a public URL and cannot mark a deployment live. Routing and readiness are decided by the control plane.
+- **Protocol contracts.** `types.ts` and `pair-command.ts` mirror ProjectMind's `packages/personal-node-contracts`. Keep them identical when either side changes.
+- **Version.** Heartbeats report `projectmind-agent@<version>+<hash of src/personal-node>`. The server uses it to tell when a computer runs an outdated node.
+- **Standalone bundle.** `npm run build` also writes `dist/personal-node.mjs` (ESM, `node personal-node.mjs run`). ProjectMind serves that file at `/personal-node/agent.mjs` for computers set up with the older single-file command.
+
 ## Tests
 
 ```bash

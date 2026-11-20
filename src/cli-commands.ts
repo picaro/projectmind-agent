@@ -22,6 +22,11 @@ import { parseAllowlist, effectiveAllowlist } from "./safety.js";
 import { normalizeMcpBaseUrl } from "./machine.js";
 import { envFileHasImemoryApiKey } from "./api-key.js";
 import { existsSync } from "node:fs";
+import {
+  collectNodeStatus,
+  formatNodeStatus,
+  type NodeStatus,
+} from "./personal-node/command.ts";
 
 type DiagnosticIssue = {
   category: "error" | "warning" | "info";
@@ -185,6 +190,29 @@ async function checkRunners(): Promise<DiagnosticIssue[]> {
   return issues;
 }
 
+/** The node is optional: not pairing is informational, a paired node without Docker is a warning. */
+export function personalNodeIssues(status: NodeStatus): DiagnosticIssue[] {
+  if (!status.paired) {
+    return [
+      {
+        category: "info",
+        message: "Local cloud node is not paired (optional)",
+        fix: "To host apps on this computer: projectmind-agent node pair",
+      },
+    ];
+  }
+  if (status.docker.enabled && !status.docker.reachable) {
+    return [
+      {
+        category: "warning",
+        message: "Local cloud node is paired but no Docker socket answered",
+        fix: "Start Docker Desktop, OrbStack or Colima, or set IMEMORY_PERSONAL_NODE_DOCKER_SOCKET",
+      },
+    ];
+  }
+  return [];
+}
+
 export async function runDoctorCommand(envPath: string): Promise<number> {
   console.log("\n╔═══════════════════════════════════════════════════════════╗");
   console.log("║       ProjectMind Agent - Diagnostics                    ║");
@@ -266,6 +294,18 @@ export async function runDoctorCommand(envPath: string): Promise<number> {
     if (issue.fix && issue.category !== "info") {
       issue.fix.split("\n").forEach(line => console.log(`    ${line}`));
     }
+  });
+  console.log();
+
+  // Check 5: Local cloud node (optional)
+  console.log("→ Checking local cloud node...");
+  const nodeStatus = await collectNodeStatus(process.env);
+  for (const line of formatNodeStatus(nodeStatus)) console.log(`    ${line}`);
+  const nodeIssues = personalNodeIssues(nodeStatus);
+  allIssues.push(...nodeIssues);
+  nodeIssues.forEach((issue) => {
+    console.log(`  ${issue.category === "warning" ? "⚠" : "ℹ"} ${issue.message}`);
+    if (issue.fix) console.log(`    Fix: ${issue.fix}`);
   });
   console.log();
   
@@ -425,6 +465,7 @@ export type CliCommand =
   | "runners"
   | "prune-worktrees"
   | "exec-job"
+  | "node"
   | "help"
   | "version";
 
@@ -444,6 +485,7 @@ export function parseCliCommand(args: string[]): { command: CliCommand | null; a
       "runners",
       "prune-worktrees",
       "exec-job",
+      "node",
       "help",
       "version",
     ].includes(first)
@@ -468,14 +510,18 @@ Commands:
   runners          List available runners
   prune-worktrees  Delete leftover isolated task worktrees
   exec-job         Claim and run one child job then exit (used by the parent agent)
+  node             Local cloud on this computer: node pair | run | status
   help             Show this help message
   version          Show version information
   
-  (no command)  Start the agent (heartbeat and job polling)
+  (no command)  Start the agent (heartbeat and job polling, plus the local-cloud
+                node when this computer is paired)
 
 Examples:
   projectmind-agent              # Start the agent
   projectmind-agent login        # Connect with browser (recommended)
+  projectmind-agent node pair    # Pair this computer for local cloud (one time)
+  projectmind-agent node status  # Pairing, Docker socket and cloudflared
   projectmind-agent setup        # Configure allowlist / runners
   projectmind-agent doctor            # Check for issues
   projectmind-agent prune-worktrees   # Free disk from leftover task checkouts

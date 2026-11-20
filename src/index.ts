@@ -30,11 +30,13 @@ import {
 import {
   detectInstall,
   isAutoUpdateEnabled,
+  defaultRestart,
   maybeSelfUpdate,
   parseUpdateCheckIntervalMs,
 } from "./self-update.js";
 import { shouldRunSetupWizard, runSetupWizard } from "./setup-wizard.js";
-import { runDeviceLogin } from "./device-login.js";
+import { openBrowser, runDeviceLogin } from "./device-login.js";
+import { runNodeCommand } from "./personal-node/command.ts";
 import {
   parseCliCommand,
   runSetupCommand,
@@ -47,7 +49,13 @@ import {
   showVersion,
 } from "./cli-commands.js";
 import { resolveAutoRunnerChainWithDiagnostics } from "./runners/resolve.js";
-import { liveChildWorkerCount, parseExecJobArgs, stopAllChildWorkers } from "./child-jobs.js";
+import {
+  liveChildWorkerCount,
+  parseExecJobArgs,
+  resolveSelfSpawnSpec,
+  stopAllChildWorkers,
+} from "./child-jobs.js";
+import { NodeSupervisor, shouldAutostartNode } from "./personal-node/supervisor.ts";
 import {
   ContinuousTestCoordinator,
   continuousTestsEnabled,
@@ -300,6 +308,15 @@ async function main(): Promise<void> {
     const exitCode = await runPruneWorktreesCommand();
     process.exit(exitCode);
   }
+
+  if (command === "node") {
+    const exitCode = await runNodeCommand(args, process.env, {
+      stdout: (line) => process.stdout.write(line),
+      stderr: (line) => process.stderr.write(line),
+      pair: { openUrl: openBrowser },
+    });
+    process.exit(exitCode);
+  }
   
   // Check if setup wizard should run (only when starting agent normally)
   if (!command) {
@@ -440,6 +457,23 @@ async function main(): Promise<void> {
     console.log(`  Workspaces: ${allowlist.length} path(s)`);
   }
   
+  let nodeSupervisor: NodeSupervisor | null = null;
+  // The new agent starts its own node: stop this one (and its tunnel) before spawning it.
+  const restartAfterNode = (install: Parameters<typeof defaultRestart>[0]) => {
+    void (nodeSupervisor?.stop() ?? Promise.resolve()).finally(() => defaultRestart(install));
+  };
+  if (shouldAutostartNode(process.env)) {
+    console.log("  Local cloud node: on (this computer is paired)");
+    nodeSupervisor = new NodeSupervisor({ spec: resolveSelfSpawnSpec(["node", "run"]) });
+    nodeSupervisor.start();
+  } else {
+    console.log(
+      process.env.IMEMORY_PERSONAL_NODE_AUTOSTART?.trim() === "0"
+        ? "  Local cloud node: off (IMEMORY_PERSONAL_NODE_AUTOSTART=0)"
+        : "  Local cloud node: not paired (run `projectmind-agent node pair` to host apps here)",
+    );
+  }
+
   console.log("\nPress Ctrl+C to stop\n");
 
   // Drop orphaned task worktrees left behind when control-plane "cleanup"
@@ -468,9 +502,10 @@ async function main(): Promise<void> {
 
   if (autoUpdate) {
     try {
-      const update = await maybeSelfUpdate(mcpUrl, { busy: false });
+      const update = await maybeSelfUpdate(mcpUrl, { busy: false, restart: restartAfterNode });
       lastUpdateCheckAt = Date.now();
       if (update.updated) {
+        await nodeSupervisor?.stop();
         return;
       }
       console.log(`Auto-update: ${update.detail}`);
@@ -548,7 +583,7 @@ async function main(): Promise<void> {
       clearActiveJob(active.jobId);
     }
     await continuousTests.shutdown();
-    await stopAllChildWorkers();
+    await Promise.all([stopAllChildWorkers(), nodeSupervisor?.stop()]);
     await client.close().catch(() => {});
     process.exit(0);
   };
@@ -598,10 +633,11 @@ async function main(): Promise<void> {
         const now = Date.now();
         if (autoUpdate && !continuousTests.isRunning() && now - lastUpdateCheckAt >= updateCheckMs) {
           lastUpdateCheckAt = now;
-          const update = await maybeSelfUpdate(mcpUrl, { busy: false });
+          const update = await maybeSelfUpdate(mcpUrl, { busy: false, restart: restartAfterNode });
           if (update.updated) {
             // Restart scheduled by self-update; stop heartbeats and yield.
             if (heartbeatTimer) clearInterval(heartbeatTimer);
+            await nodeSupervisor?.stop();
             return;
           }
           if (pollCount === 0 || update.detail !== `up to date (${agentVersion})`) {

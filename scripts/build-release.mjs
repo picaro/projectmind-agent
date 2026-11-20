@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { writePackagedEnvFiles } from "./packaged-env.mjs";
+import { personalNodeBuildStamp } from "./build-personal-node.mjs";
 import {
   buildNodejsPackageJson,
   writeNodejsStartHelper,
@@ -164,6 +165,7 @@ async function main() {
     define: {
       "process.env.IMEMORY_AGENT_EMBEDDED_VERSION": JSON.stringify(version),
       "process.env.IMEMORY_AGENT_EMBEDDED_BUILD_DATE": JSON.stringify(buildDate),
+      __PERSONAL_NODE_AGENT_BUILD__: JSON.stringify(personalNodeBuildStamp()),
     },
     logLevel: "info",
   });
