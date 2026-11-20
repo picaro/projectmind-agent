@@ -19,7 +19,12 @@ import { selectLanAddress } from "./lan-address.ts";
 import { runAgentLoop } from "./loop.ts";
 import { readListenPid } from "./quick-share.ts";
 import { redactSecrets } from "./redact.ts";
-import { acquireRunLock, NODE_EXIT_ALREADY_RUNNING, SUPERVISOR_PID_ENV } from "./run-lock.ts";
+import {
+  acquireRunLock,
+  NODE_EXIT_ALREADY_RUNNING,
+  NODE_EXIT_NEEDS_PAIRING,
+  SUPERVISOR_PID_ENV,
+} from "./run-lock.ts";
 import { readState, writeState } from "./state.ts";
 import { AGENT_VERSION, archFromProcess, type CommandExecutor } from "./types.ts";
 
@@ -73,13 +78,24 @@ export async function main(
       return 0;
     }
 
-    const state = await readState(config.stateDir);
-    if (!state) throw new Error("Personal node state is missing. Run pair first.");
+    let state: Awaited<ReturnType<typeof readState>>;
+    try {
+      state = await readState(config.stateDir);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unreadable";
+      stderr(
+        `${redactSecrets(`Personal node state in ${config.stateDir} is invalid (${message}). Pair again with \`node pair --force\`.`, secrets)}\n`,
+      );
+      return NODE_EXIT_NEEDS_PAIRING;
+    }
+    if (!state) {
+      stderr("Personal node state is missing. Run pair first.\n");
+      return NODE_EXIT_NEEDS_PAIRING;
+    }
     const server = config.server || state.server;
     if (!server) {
-      throw new Error(
-        "Saved personal node state has no server origin. Pair again, or pass --server.",
-      );
+      stderr("Saved personal node state has no server origin. Pair again, or pass --server.\n");
+      return NODE_EXIT_NEEDS_PAIRING;
     }
     secrets.push(state.deviceToken);
     const client = new PersonalNodeClient({
