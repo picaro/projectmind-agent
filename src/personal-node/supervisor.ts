@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 
 import { defaultStateDir } from "./command.ts";
+import { NODE_EXIT_ALREADY_RUNNING, SUPERVISOR_PID_ENV } from "./run-lock.ts";
 import { stateFilePath } from "./state.ts";
 
 /** `node run` exits 3 when the control plane revoked this computer. */
@@ -35,6 +36,8 @@ export type NodeSupervisorOptions = {
   maxDelayMs?: number;
   /** A child that ran this long resets the backoff. */
   stableMs?: number;
+  /** Retry delay while another `node run` holds the state directory. */
+  lockedRetryMs?: number;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -70,6 +73,7 @@ export class NodeSupervisor {
   private stopped = false;
   private failures = 0;
   private startedAt = 0;
+  private reportedLocked = false;
   private readonly log: (line: string) => void;
   private readonly spawnImpl: NonNullable<NodeSupervisorOptions["spawnImpl"]>;
   private readonly now: () => number;
@@ -96,11 +100,10 @@ export class NodeSupervisor {
     if (this.stopped || this.child) return;
     this.timer = null;
     process.once("exit", this.onProcessExit);
-    const child = this.spawnImpl(
-      this.options.spec.command,
-      this.options.spec.args,
-      this.options.env ?? process.env,
-    );
+    const child = this.spawnImpl(this.options.spec.command, this.options.spec.args, {
+      ...(this.options.env ?? process.env),
+      [SUPERVISOR_PID_ENV]: String(process.pid),
+    });
     this.child = child;
     this.startedAt = this.now();
     prefixLines(child.stdout, this.log);
@@ -124,6 +127,16 @@ export class NodeSupervisor {
       );
       return;
     }
+    if (code === NODE_EXIT_ALREADY_RUNNING) {
+      // A standalone `node run`, or the previous agent's node during a restart.
+      if (!this.reportedLocked) {
+        this.log("[node] another node run already uses this computer's pairing; waiting for it to stop");
+        this.reportedLocked = true;
+      }
+      this.timer = this.setTimer(() => this.start(), this.options.lockedRetryMs ?? 15_000);
+      return;
+    }
+    this.reportedLocked = false;
     const stableMs = this.options.stableMs ?? 60_000;
     this.failures = this.now() - this.startedAt >= stableMs ? 1 : this.failures + 1;
     const delay = restartDelayMs(

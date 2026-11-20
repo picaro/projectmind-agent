@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
+import { NODE_EXIT_ALREADY_RUNNING, SUPERVISOR_PID_ENV } from "./run-lock.ts";
 import {
   NODE_EXIT_REVOKED,
   NodeSupervisor,
@@ -24,15 +25,15 @@ class FakeChild extends EventEmitter {
 function harness(options: { stableMs?: number } = {}) {
   let at = 0;
   const children: FakeChild[] = [];
-  const spawned: Array<{ command: string; args: string[] }> = [];
+  const spawned: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
   const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
   const logs: string[] = [];
   const supervisor = new NodeSupervisor({
     spec: { command: "/usr/bin/node", args: ["/agent/cli.cjs", "node", "run"] },
     env: {},
     log: (line) => logs.push(line),
-    spawnImpl: (command, args) => {
-      spawned.push({ command, args });
+    spawnImpl: (command, args, env) => {
+      spawned.push({ command, args, env });
       const child = new FakeChild();
       children.push(child);
       return child as unknown as ChildProcess;
@@ -84,7 +85,7 @@ describe("NodeSupervisor", () => {
     const h = harness();
     h.supervisor.start();
     expect(h.spawned).toEqual([
-      { command: "/usr/bin/node", args: ["/agent/cli.cjs", "node", "run"] },
+      expect.objectContaining({ command: "/usr/bin/node", args: ["/agent/cli.cjs", "node", "run"] }),
     ]);
     h.children[0]?.stdout.write("runtime_status=available tunnel_status=unavailable\npartial");
     h.children[0]?.stdout.end();
@@ -144,5 +145,27 @@ describe("NodeSupervisor", () => {
     h.children[0]?.emit("error", new Error("ENOENT"));
     expect(h.logs[0]).toBe("[node] could not start: ENOENT");
     expect(h.timers).toHaveLength(1);
+  });
+});
+
+describe("NodeSupervisor with another runner", () => {
+  it("tells the child its parent pid", () => {
+    const h = harness();
+    h.supervisor.start();
+    expect(h.spawned[0]?.env[SUPERVISOR_PID_ENV]).toBe(String(process.pid));
+    void h.supervisor.stop(10);
+  });
+
+  it("waits for another node run without backing off or repeating the message", () => {
+    const h = harness();
+    h.supervisor.start();
+    h.children[0]?.emit("exit", NODE_EXIT_ALREADY_RUNNING);
+    h.timers.at(-1)?.fn();
+    h.children[1]?.emit("exit", NODE_EXIT_ALREADY_RUNNING);
+    expect(h.timers.map((timer) => timer.ms)).toEqual([15_000, 15_000]);
+    expect(h.logs.filter((line) => line.includes("another node run"))).toHaveLength(1);
+    h.timers.at(-1)?.fn();
+    expect(h.spawned).toHaveLength(3);
+    void h.supervisor.stop(10);
   });
 });

@@ -19,6 +19,7 @@ import { selectLanAddress } from "./lan-address.ts";
 import { runAgentLoop } from "./loop.ts";
 import { readListenPid } from "./quick-share.ts";
 import { redactSecrets } from "./redact.ts";
+import { acquireRunLock, NODE_EXIT_ALREADY_RUNNING, SUPERVISOR_PID_ENV } from "./run-lock.ts";
 import { readState, writeState } from "./state.ts";
 import { AGENT_VERSION, archFromProcess, type CommandExecutor } from "./types.ts";
 
@@ -45,6 +46,7 @@ export async function main(
     return 0;
   }
   let secrets: string[] = [];
+  let releaseLock: (() => void) | undefined;
   try {
     const config = parseCli(argv, runtimeEnv);
     secrets = [config.code, config.sessionId].filter((value): value is string => Boolean(value));
@@ -110,6 +112,15 @@ export async function main(
       stdout(`runtime_status=${heartbeat.runtimeStatus} tunnel_status=${heartbeat.tunnelStatus}\n`);
       return 0;
     }
+
+    const lock = acquireRunLock(config.stateDir);
+    if ("heldBy" in lock) {
+      stderr(
+        `another node run (pid ${lock.heldBy || "unknown"}) already uses ${config.stateDir}. Stop it first.\n`,
+      );
+      return NODE_EXIT_ALREADY_RUNNING;
+    }
+    releaseLock = lock.release;
 
     let docker: ReturnType<typeof createProcessDockerClient> | undefined;
     const tunnels = createTunnelSupervisor({
@@ -191,6 +202,7 @@ export async function main(
     };
     process.once("SIGINT", onStop);
     process.once("SIGTERM", onStop);
+    const stopParentWatch = watchSupervisor(runtimeEnv, onStop);
     try {
       const result = await runAgentLoop({
         client,
@@ -235,6 +247,7 @@ export async function main(
       stdout(`cycle applied=${result.applied.length} skipped=${result.skipped.length}\n`);
       return 0;
     } finally {
+      stopParentWatch();
       await tunnels.stopAll();
       process.off("SIGINT", onStop);
       process.off("SIGTERM", onStop);
@@ -247,5 +260,28 @@ export async function main(
     const message = error instanceof Error ? error.message : "personal-node-agent failed";
     stderr(`${redactSecrets(message, secrets)}\n`);
     return 1;
+  } finally {
+    releaseLock?.();
   }
+}
+
+/**
+ * Under `projectmind-agent`, stop when that parent goes away (SIGKILL, crash) instead of
+ * running on with a tunnel nobody supervises, and do not crash on a closed stdout pipe.
+ */
+function watchSupervisor(env: NodeJS.ProcessEnv, onStop: () => void): () => void {
+  const parent = Number.parseInt(env[SUPERVISOR_PID_ENV] ?? "", 10);
+  if (!Number.isInteger(parent) || parent <= 1) return () => {};
+  const onPipeError = () => onStop();
+  process.stdout.on("error", onPipeError);
+  process.stderr.on("error", onPipeError);
+  const timer = setInterval(() => {
+    if (process.ppid !== parent) onStop();
+  }, 5_000);
+  timer.unref();
+  return () => {
+    clearInterval(timer);
+    process.stdout.off("error", onPipeError);
+    process.stderr.off("error", onPipeError);
+  };
 }

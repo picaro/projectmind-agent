@@ -1,10 +1,12 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { main } from "./cli.js";
 import { buildHeartbeat } from "./heartbeat.js";
+import { NODE_EXIT_ALREADY_RUNNING, runLockPath } from "./run-lock.js";
 import { readState, stateFilePath, writeState } from "./state.js";
 
 const NODE = "550e8400-e29b-41d4-a716-446655440010";
@@ -310,6 +312,38 @@ describe("personal-node-agent cli", () => {
     expect(ran).toBe(0);
     expect(urls[0]).toBe(`http://127.0.0.1:9/api/personal-nodes/${NODE}/tunnel`);
     expect(urls).toContain(`http://127.0.0.1:9/api/personal-nodes/${NODE}/sync`);
+    expect(existsSync(runLockPath(dir))).toBe(false);
+  });
+
+  it("run refuses to share the state directory with another live runner", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pna-cli-"));
+    await writeState(dir, {
+      sessionId: SESSION,
+      nodeId: NODE,
+      deviceToken: TOKEN,
+      server: "http://127.0.0.1:8080",
+      completedCommandIds: [],
+    });
+    await writeFile(runLockPath(dir), `${process.ppid}\n`);
+    let err = "";
+    let fetched = 0;
+    const ran = await main(
+      ["run", "--once", "--state-dir", dir],
+      { IMEMORY_PERSONAL_NODE_DOCKER: "0" },
+      {
+        stderr: (line) => {
+          err += line;
+        },
+        fetchImpl: async () => {
+          fetched += 1;
+          return new Response("{}", { status: 200 });
+        },
+      },
+    );
+    expect(ran).toBe(NODE_EXIT_ALREADY_RUNNING);
+    expect(err).toContain(`another node run (pid ${process.ppid})`);
+    expect(fetched).toBe(0);
+    expect((await readFile(runLockPath(dir), "utf8")).trim()).toBe(String(process.ppid));
   });
 
   it("run without a saved server origin explains that pair must store one", async () => {

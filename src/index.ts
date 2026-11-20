@@ -30,6 +30,7 @@ import {
 import {
   detectInstall,
   isAutoUpdateEnabled,
+  defaultRestart,
   maybeSelfUpdate,
   parseUpdateCheckIntervalMs,
 } from "./self-update.js";
@@ -457,6 +458,10 @@ async function main(): Promise<void> {
   }
   
   let nodeSupervisor: NodeSupervisor | null = null;
+  // The new agent starts its own node: stop this one (and its tunnel) before spawning it.
+  const restartAfterNode = (install: Parameters<typeof defaultRestart>[0]) => {
+    void (nodeSupervisor?.stop() ?? Promise.resolve()).finally(() => defaultRestart(install));
+  };
   if (shouldAutostartNode(process.env)) {
     console.log("  Local cloud node: on (this computer is paired)");
     nodeSupervisor = new NodeSupervisor({ spec: resolveSelfSpawnSpec(["node", "run"]) });
@@ -497,7 +502,7 @@ async function main(): Promise<void> {
 
   if (autoUpdate) {
     try {
-      const update = await maybeSelfUpdate(mcpUrl, { busy: false });
+      const update = await maybeSelfUpdate(mcpUrl, { busy: false, restart: restartAfterNode });
       lastUpdateCheckAt = Date.now();
       if (update.updated) {
         await nodeSupervisor?.stop();
@@ -628,7 +633,7 @@ async function main(): Promise<void> {
         const now = Date.now();
         if (autoUpdate && !continuousTests.isRunning() && now - lastUpdateCheckAt >= updateCheckMs) {
           lastUpdateCheckAt = now;
-          const update = await maybeSelfUpdate(mcpUrl, { busy: false });
+          const update = await maybeSelfUpdate(mcpUrl, { busy: false, restart: restartAfterNode });
           if (update.updated) {
             // Restart scheduled by self-update; stop heartbeats and yield.
             if (heartbeatTimer) clearInterval(heartbeatTimer);
