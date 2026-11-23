@@ -45,6 +45,11 @@ export type TaskWorkspacePrep = {
   mustMaterialize?: boolean;
   /** Control-plane hint: rematerialize when the leaf is missing on disk. */
   recreateIfMissing?: boolean;
+  /**
+   * Delete this task branch and worktree, then create the worktree again from
+   * the base branch. Set by a task "start over".
+   */
+  resetToBase?: boolean;
 };
 
 async function runGit(
@@ -89,13 +94,32 @@ export type EnsureTaskWorktreeResult =
  * `ready` / `retained` / `expired` recreate when the path is missing;
  * `cleaned` / `failed` are terminal allocations.
  */
+const PROTECTED_BRANCHES = new Set([
+  "main",
+  "master",
+  "trunk",
+  "develop",
+  "development",
+  "head",
+]);
+
+/** Keep in sync with `isResettableTaskBranch` in the control plane. */
+export function isResettableTaskBranch(branchName: string | null | undefined): boolean {
+  const name = (branchName ?? "").trim().toLowerCase();
+  if (!name || name.includes("..") || name.startsWith("-") || name.includes(" ")) return false;
+  if (PROTECTED_BRANCHES.has(name)) return false;
+  if (name.startsWith("epic/")) return false;
+  return name.startsWith("pm/task/") || name.startsWith("agent/");
+}
+
 export function shouldEnsureTaskWorktree(
   prep: Pick<
     TaskWorkspacePrep,
-    "status" | "localPath" | "mustMaterialize" | "recreateIfMissing"
+    "status" | "localPath" | "mustMaterialize" | "recreateIfMissing" | "resetToBase"
   >,
   existsSync: (p: string) => boolean = fs.existsSync,
 ): boolean {
+  if (prep.resetToBase === true) return true;
   if (prep.mustMaterialize === true) return true;
   const status = prep.status.trim().toLowerCase();
   if (!status || status === "cleaned" || status === "failed") return false;
@@ -127,7 +151,50 @@ export async function ensureTaskWorktree(
 
   const git = deps.runGit ?? runGit;
 
-  if (fs.existsSync(worktree)) {
+  if (prep.resetToBase) {
+    if (!isResettableTaskBranch(branch)) {
+      return { ok: false, reason: `Refusing to reset branch ${branch}` };
+    }
+    if (fs.existsSync(worktree)) {
+      if (fs.existsSync(base)) {
+        await git(base, ["worktree", "remove", "--force", worktree]);
+      }
+      if (fs.existsSync(worktree)) {
+        try {
+          fs.rmSync(worktree, { recursive: true, force: true });
+        } catch (err) {
+          return {
+            ok: false,
+            reason: `Could not remove worktree ${worktree}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          };
+        }
+      }
+    }
+    if (fs.existsSync(base)) {
+      const head = await git(base, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      if (head.code === 0 && head.stdout.trim() === branch) {
+        const baseBranch = prep.baseBranch.trim() || "main";
+        const switched = await git(base, ["checkout", baseBranch]);
+        if (switched.code !== 0) {
+          return {
+            ok: false,
+            reason: `Could not leave ${branch} before deleting it: ${(switched.stderr || switched.stdout).trim()}`,
+          };
+        }
+      }
+      await git(base, ["branch", "-D", branch]);
+      await execFileAsync("git", ["push", "origin", "--delete", branch], {
+        cwd: base,
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      }).catch(() => undefined);
+    }
+  }
+
+  if (!prep.resetToBase && fs.existsSync(worktree)) {
     const inside = await git(worktree, ["rev-parse", "--is-inside-work-tree"]);
     if (inside.code === 0 && inside.stdout.trim().includes("true")) {
       return { ok: true, created: false, detail: "Worktree already present" };
@@ -156,8 +223,21 @@ export async function ensureTaskWorktree(
 
   fs.mkdirSync(path.dirname(worktree), { recursive: true });
 
-  const add = await git(base, ["worktree", "add", "-b", branch, worktree, "HEAD"]);
+  let startPoint = "HEAD";
+  if (prep.resetToBase) {
+    const baseBranch = prep.baseBranch.trim() || "main";
+    const originBase = `origin/${baseBranch}`;
+    const originTip = await git(base, ["rev-parse", "--verify", "--quiet", originBase]);
+    startPoint = originTip.code === 0 && originTip.stdout.trim() ? originBase : baseBranch;
+  }
+  const add = await git(base, ["worktree", "add", "-b", branch, worktree, startPoint]);
   if (add.code !== 0) {
+    if (prep.resetToBase) {
+      return {
+        ok: false,
+        reason: `git worktree add failed: ${(add.stderr || add.stdout).trim()}`,
+      };
+    }
     const retry = await git(base, ["worktree", "add", worktree, branch]);
     if (retry.code !== 0) {
       return {

@@ -106,6 +106,7 @@ export type ClaimedJobPayload = {
     status: string;
     mustMaterialize?: boolean;
     recreateIfMissing?: boolean;
+    resetToBase?: boolean;
   } | null;
   /** Repo identity for the project, when it has one. */
   repository?: {

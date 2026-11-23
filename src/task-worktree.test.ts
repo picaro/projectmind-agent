@@ -139,6 +139,49 @@ describe("ensureTaskWorktree", () => {
     if (second.ok) expect(second.created).toBe(false);
   });
 
+  it("resets an existing task branch back to the base commit", async () => {
+    const root = testTempRoot("mac-tw-reset-");
+    const base = path.join(root, "base");
+    const wt = path.join(root, "tasks", "t-reset");
+    initRepo(base);
+    execFileSync("git", ["branch", "-M", "main"], { cwd: base, stdio: "ignore" });
+    const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: base, encoding: "utf8" }).trim();
+
+    const created = await ensureTaskWorktree({
+      id: "tw-reset",
+      localPath: wt,
+      baseLocalPath: base,
+      branchName: "pm/task/reset1",
+      baseBranch: "main",
+      status: "pending",
+    });
+    expect(created.ok).toBe(true);
+    fs.writeFileSync(path.join(wt, "extra.txt"), "extra\n");
+    execFileSync("git", ["add", "extra.txt"], { cwd: wt, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "task work"], { cwd: wt, stdio: "ignore" });
+
+    expect(
+      shouldEnsureTaskWorktree(
+        { status: "ready", localPath: wt, resetToBase: true },
+        () => true,
+      ),
+    ).toBe(true);
+
+    const reset = await ensureTaskWorktree({
+      id: "tw-reset",
+      localPath: wt,
+      baseLocalPath: base,
+      branchName: "pm/task/reset1",
+      baseBranch: "main",
+      status: "ready",
+      resetToBase: true,
+    });
+    expect(reset.ok).toBe(true);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: wt, encoding: "utf8" }).trim();
+    expect(head).toBe(baseSha);
+    expect(fs.existsSync(path.join(wt, "extra.txt"))).toBe(false);
+  });
+
   it("recreates a ready worktree after the directory was removed", async () => {
     const root = testTempRoot("mac-tw-recreate-");
     const base = path.join(root, "base");
